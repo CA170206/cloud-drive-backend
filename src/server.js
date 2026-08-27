@@ -4,6 +4,8 @@ const helmet = require("helmet");
 const morgan = require("morgan");
 require("dotenv").config();
 
+const { connectDatabase } = require("./config/database");
+
 const app = express();
 const PORT = process.env.PORT || 5000;
 
@@ -22,6 +24,12 @@ app.get("/api/health", (req, res) => {
 });
 
 // Start server
-app.listen(PORT, () => {
-  console.log(`🚀 Cloud Drive API running on http://localhost:${PORT}`);
-});
+const startServer = async () => {
+  await connectDatabase();
+
+  app.listen(PORT, () => {
+    console.log(`🚀 Cloud Drive API running on http://localhost:${PORT}`);
+  });
+};
+
+startServer();
