@@ -38,9 +38,11 @@ const register = async (req, res) => {
       });
     }
 
+    const normalizedEmail = email.toLowerCase().trim();
+
     const existingUser = await pool.query(
       "SELECT id FROM users WHERE email = $1",
-      [email.toLowerCase()]
+      [normalizedEmail]
     );
 
     if (existingUser.rows.length > 0) {
@@ -58,7 +60,7 @@ const register = async (req, res) => {
       `INSERT INTO users (email, password_hash, name)
        VALUES ($1, $2, $3)
        RETURNING id, email, name, image_url, created_at`,
-      [email.toLowerCase(), passwordHash, name]
+      [normalizedEmail, passwordHash, name.trim()]
     );
 
     const user = result.rows[0];
@@ -100,9 +102,13 @@ const login = async (req, res) => {
       });
     }
 
+    const normalizedEmail = email.toLowerCase().trim();
+
     const result = await pool.query(
-      "SELECT id, email, name, image_url, password_hash, created_at FROM users WHERE email = $1",
-      [email.toLowerCase()]
+      `SELECT id, email, name, image_url, password_hash, created_at
+       FROM users
+       WHERE email = $1`,
+      [normalizedEmail]
     );
 
     if (result.rows.length === 0) {
@@ -157,8 +163,46 @@ const login = async (req, res) => {
   }
 };
 
+const getMe = async (req, res) => {
+  try {
+    const result = await pool.query(
+      `SELECT id, email, name, image_url, created_at
+       FROM users
+       WHERE id = $1`,
+      [req.user.userId]
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({
+        error: {
+          code: "USER_NOT_FOUND",
+          message: "User not found",
+        },
+      });
+    }
+
+    return res.status(200).json({
+      success: true,
+      user: result.rows[0],
+    });
+  } catch (error) {
+    console.error("Get user error:", error);
+
+    return res.status(500).json({
+      error: {
+        code: "INTERNAL_ERROR",
+        message: "Unable to fetch user",
+      },
+    });
+  }
+};
+
 const logout = async (req, res) => {
-  res.clearCookie("token");
+  res.clearCookie("token", {
+    httpOnly: true,
+    sameSite: "lax",
+    secure: process.env.NODE_ENV === "production",
+  });
 
   return res.status(200).json({
     success: true,
@@ -169,5 +213,6 @@ const logout = async (req, res) => {
 module.exports = {
   register,
   login,
+  getMe,
   logout,
 };
