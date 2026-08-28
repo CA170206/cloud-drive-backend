@@ -21,8 +21,7 @@ const uploadFile = async (req, res) => {
 
     if (folderId) {
       const folder = await pool.query(
-        `SELECT id
-         FROM folders
+        `SELECT id FROM folders
          WHERE id = $1
          AND owner_id = $2
          AND is_deleted = FALSE`,
@@ -85,15 +84,8 @@ const getFiles = async (req, res) => {
     const { folderId } = req.query;
 
     const result = await pool.query(
-      `SELECT
-         id,
-         name,
-         mime_type,
-         size_bytes,
-         owner_id,
-         folder_id,
-         created_at,
-         updated_at
+      `SELECT id, name, mime_type, size_bytes,
+              owner_id, folder_id, created_at, updated_at
        FROM files
        WHERE owner_id = $1
        AND is_deleted = FALSE
@@ -116,6 +108,48 @@ const getFiles = async (req, res) => {
       error: {
         code: "INTERNAL_ERROR",
         message: "Unable to fetch files",
+      },
+    });
+  }
+};
+
+const getStorageStats = async (req, res) => {
+  try {
+    const ownerId = req.user.userId;
+
+    const files = await pool.query(
+      `SELECT
+         COUNT(*)::int AS file_count,
+         COALESCE(SUM(size_bytes), 0)::bigint AS storage_used
+       FROM files
+       WHERE owner_id = $1
+       AND is_deleted = FALSE`,
+      [ownerId]
+    );
+
+    const folders = await pool.query(
+      `SELECT COUNT(*)::int AS folder_count
+       FROM folders
+       WHERE owner_id = $1
+       AND is_deleted = FALSE`,
+      [ownerId]
+    );
+
+    return res.status(200).json({
+      success: true,
+      stats: {
+        fileCount: files.rows[0].file_count,
+        folderCount: folders.rows[0].folder_count,
+        storageUsed: Number(files.rows[0].storage_used),
+      },
+    });
+  } catch (error) {
+    console.error("Get storage stats error:", error);
+
+    return res.status(500).json({
+      error: {
+        code: "INTERNAL_ERROR",
+        message: "Unable to fetch storage statistics",
       },
     });
   }
@@ -213,6 +247,7 @@ const deleteFile = async (req, res) => {
 module.exports = {
   uploadFile,
   getFiles,
+  getStorageStats,
   downloadFile,
   deleteFile,
 };

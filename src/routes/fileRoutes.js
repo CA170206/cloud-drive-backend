@@ -7,6 +7,7 @@ const authMiddleware = require("../middleware/authMiddleware");
 const {
   uploadFile,
   getFiles,
+  getStorageStats,
   downloadFile,
   deleteFile,
 } = require("../controllers/fileController");
@@ -36,7 +37,6 @@ const upload = multer({
 
 router.use(authMiddleware);
 
-// Accept multipart files
 router.post("/upload", upload.any(), (req, res) => {
   if (!req.files || req.files.length === 0) {
     return res.status(400).json({
@@ -47,11 +47,13 @@ router.post("/upload", upload.any(), (req, res) => {
     });
   }
 
-  // Make the first uploaded file available as req.file
   req.file = req.files[0];
 
   return uploadFile(req, res);
 });
+
+// IMPORTANT: keep this BEFORE /:id/download
+router.get("/stats", getStorageStats);
 
 router.get("/", getFiles);
 
