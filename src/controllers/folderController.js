@@ -15,7 +15,7 @@ const createFolder = async (req, res) => {
     }
 
     if (parentId) {
-      const parentResult = await pool.query(
+      const parent = await pool.query(
         `SELECT id
          FROM folders
          WHERE id = $1
@@ -24,7 +24,7 @@ const createFolder = async (req, res) => {
         [parentId, ownerId]
       );
 
-      if (parentResult.rows.length === 0) {
+      if (parent.rows.length === 0) {
         return res.status(404).json({
           error: {
             code: "PARENT_NOT_FOUND",
@@ -41,36 +41,12 @@ const createFolder = async (req, res) => {
       [name.trim(), ownerId, parentId]
     );
 
-    const folder = result.rows[0];
-
-    await pool.query(
-      `INSERT INTO activities
-       (actor_id, action, resource_type, resource_id, context)
-       VALUES ($1, 'upload', 'folder', $2, $3)`,
-      [
-        ownerId,
-        folder.id,
-        JSON.stringify({
-          name: folder.name,
-        }),
-      ]
-    );
-
     return res.status(201).json({
       success: true,
-      folder,
+      folder: result.rows[0],
     });
   } catch (error) {
     console.error("Create folder error:", error);
-
-    if (error.code === "23505") {
-      return res.status(409).json({
-        error: {
-          code: "FOLDER_EXISTS",
-          message: "A folder with this name already exists here",
-        },
-      });
-    }
 
     return res.status(500).json({
       error: {
@@ -157,36 +133,12 @@ const renameFolder = async (req, res) => {
       });
     }
 
-    const folder = result.rows[0];
-
-    await pool.query(
-      `INSERT INTO activities
-       (actor_id, action, resource_type, resource_id, context)
-       VALUES ($1, 'rename', 'folder', $2, $3)`,
-      [
-        ownerId,
-        folder.id,
-        JSON.stringify({
-          newName: folder.name,
-        }),
-      ]
-    );
-
     return res.status(200).json({
       success: true,
-      folder,
+      folder: result.rows[0],
     });
   } catch (error) {
     console.error("Rename folder error:", error);
-
-    if (error.code === "23505") {
-      return res.status(409).json({
-        error: {
-          code: "FOLDER_EXISTS",
-          message: "A folder with this name already exists here",
-        },
-      });
-    }
 
     return res.status(500).json({
       error: {
@@ -221,21 +173,6 @@ const deleteFolder = async (req, res) => {
         },
       });
     }
-
-    const folder = result.rows[0];
-
-    await pool.query(
-      `INSERT INTO activities
-       (actor_id, action, resource_type, resource_id, context)
-       VALUES ($1, 'delete', 'folder', $2, $3)`,
-      [
-        ownerId,
-        folder.id,
-        JSON.stringify({
-          name: folder.name,
-        }),
-      ]
-    );
 
     return res.status(200).json({
       success: true,
