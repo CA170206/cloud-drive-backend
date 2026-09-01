@@ -12,6 +12,9 @@ const {
   moveFile,
   downloadFile,
   deleteFile,
+  getTrash,
+  restoreFile,
+  restoreFolder,
 } = require("../controllers/fileController");
 
 const {
@@ -121,6 +124,21 @@ router.patch(
   "/:id/move",
   requireEditorAccess("file"),
   moveFile
+);
+
+router.get(
+  "/trash",
+  getTrash
+);
+
+router.patch(
+  "/trash/:id/restore",
+  restoreFile
+);
+
+router.patch(
+  "/trash/folder/:id/restore",
+  restoreFolder
 );
 
 /* =========================================================

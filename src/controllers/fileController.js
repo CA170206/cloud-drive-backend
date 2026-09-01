@@ -633,6 +633,219 @@ const deleteFile = async (req, res) => {
    EXPORTS
 ========================================================= */
 
+/* =========================================================
+   GET TRASH
+========================================================= */
+
+const getTrash = async (req, res) => {
+  try {
+    const ownerId = req.user.userId;
+
+    const files = await pool.query(
+      `SELECT
+         id,
+         name,
+         mime_type,
+         size_bytes,
+         owner_id,
+         folder_id,
+         created_at,
+         updated_at
+       FROM files
+       WHERE owner_id = $1
+         AND is_deleted = TRUE
+       ORDER BY updated_at DESC`,
+      [ownerId]
+    );
+
+    const folders = await pool.query(
+      `SELECT
+         id,
+         name,
+         owner_id,
+         parent_id,
+         created_at,
+         updated_at
+       FROM folders
+       WHERE owner_id = $1
+         AND is_deleted = TRUE
+       ORDER BY updated_at DESC`,
+      [ownerId]
+    );
+
+    return res.status(200).json({
+      success: true,
+      trash: {
+        files: files.rows,
+        folders: folders.rows,
+      },
+    });
+  } catch (error) {
+    console.error("Get trash error:", error);
+
+    return res.status(500).json({
+      error: {
+        code: "INTERNAL_ERROR",
+        message: "Unable to fetch trash",
+      },
+    });
+  }
+};
+
+/* =========================================================
+   RESTORE FILE
+========================================================= */
+
+const restoreFile = async (req, res) => {
+  try {
+    const ownerId = req.user.userId;
+    const { id } = req.params;
+
+    const result = await pool.query(
+      `UPDATE files
+       SET is_deleted = FALSE,
+           updated_at = NOW()
+       WHERE id = $1
+         AND owner_id = $2
+         AND is_deleted = TRUE
+       RETURNING
+         id,
+         name,
+         mime_type,
+         size_bytes,
+         owner_id,
+         folder_id,
+         created_at,
+         updated_at`,
+      [id, ownerId]
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({
+        error: {
+          code: "FILE_NOT_IN_TRASH",
+          message: "Deleted file not found",
+        },
+      });
+    }
+
+    return res.status(200).json({
+      success: true,
+      message: "File restored successfully",
+      file: result.rows[0],
+    });
+  } catch (error) {
+    console.error("Restore file error:", error);
+
+    return res.status(500).json({
+      error: {
+        code: "INTERNAL_ERROR",
+        message: "Unable to restore file",
+      },
+    });
+  }
+};
+
+/* =========================================================
+   RESTORE FOLDER
+========================================================= */
+
+const restoreFolder = async (req, res) => {
+  try {
+    const ownerId = req.user.userId;
+    const { id } = req.params;
+
+    const folderResult = await pool.query(
+      `SELECT
+         id,
+         name,
+         owner_id,
+         parent_id
+       FROM folders
+       WHERE id = $1
+         AND owner_id = $2
+         AND is_deleted = TRUE`,
+      [id, ownerId]
+    );
+
+    if (folderResult.rows.length === 0) {
+      return res.status(404).json({
+        error: {
+          code: "FOLDER_NOT_IN_TRASH",
+          message: "Deleted folder not found",
+        },
+      });
+    }
+
+    const folder = folderResult.rows[0];
+
+    /*
+     * If the original parent was also deleted,
+     * restore this folder to root instead.
+     */
+    let parentId = folder.parent_id;
+
+    if (parentId) {
+      const parentResult = await pool.query(
+        `SELECT id
+         FROM folders
+         WHERE id = $1
+           AND owner_id = $2
+           AND is_deleted = FALSE`,
+        [parentId, ownerId]
+      );
+
+      if (parentResult.rows.length === 0) {
+        parentId = null;
+      }
+    }
+
+    const result = await pool.query(
+      `UPDATE folders
+       SET is_deleted = FALSE,
+           parent_id = $1,
+           updated_at = NOW()
+       WHERE id = $2
+         AND owner_id = $3
+         AND is_deleted = TRUE
+       RETURNING
+         id,
+         name,
+         owner_id,
+         parent_id,
+         is_deleted,
+         created_at,
+         updated_at`,
+      [parentId, id, ownerId]
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({
+        error: {
+          code: "FOLDER_NOT_IN_TRASH",
+          message: "Deleted folder not found",
+        },
+      });
+    }
+
+    return res.status(200).json({
+      success: true,
+      message: "Folder restored successfully",
+      folder: result.rows[0],
+    });
+  } catch (error) {
+    console.error("Restore folder error:", error);
+
+    return res.status(500).json({
+      error: {
+        code: "INTERNAL_ERROR",
+        message: "Unable to restore folder",
+      },
+    });
+  }
+};
+
+
 module.exports = {
   uploadFile,
   getFiles,
@@ -641,4 +854,7 @@ module.exports = {
   moveFile,
   downloadFile,
   deleteFile,
+  getTrash,
+  restoreFile,
+  restoreFolder,
 };
