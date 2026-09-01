@@ -8,20 +8,35 @@ const {
   uploadFile,
   getFiles,
   getStorageStats,
+  renameFile,
+  moveFile,
   downloadFile,
   deleteFile,
 } = require("../controllers/fileController");
 
+const {
+  requireEditorAccess,
+} = require("../middleware/sharePermission");
+
 const router = express.Router();
+
+/* =========================================================
+   MULTER STORAGE
+========================================================= */
 
 const storage = multer.diskStorage({
   destination: (req, file, cb) => {
-    cb(null, path.join(__dirname, "../../uploads"));
+    cb(
+      null,
+      path.join(__dirname, "../../uploads")
+    );
   },
 
   filename: (req, file, cb) => {
     const uniqueName =
-      `${Date.now()}-${Math.round(Math.random() * 1e9)}` +
+      `${Date.now()}-${Math.round(
+        Math.random() * 1e9
+      )}` +
       path.extname(file.originalname);
 
     cb(null, uniqueName);
@@ -35,30 +50,95 @@ const upload = multer({
   },
 });
 
+/* =========================================================
+   AUTH
+========================================================= */
+
 router.use(authMiddleware);
 
-router.post("/upload", upload.any(), (req, res) => {
-  if (!req.files || req.files.length === 0) {
-    return res.status(400).json({
-      error: {
-        code: "FILE_REQUIRED",
-        message: "Please select a file to upload",
-      },
-    });
+/* =========================================================
+   UPLOAD
+========================================================= */
+
+router.post(
+  "/upload",
+  upload.any(),
+  (req, res) => {
+    if (
+      !req.files ||
+      req.files.length === 0
+    ) {
+      return res.status(400).json({
+        error: {
+          code: "FILE_REQUIRED",
+          message:
+            "Please select a file to upload",
+        },
+      });
+    }
+
+    req.file = req.files[0];
+
+    return uploadFile(req, res);
   }
+);
 
-  req.file = req.files[0];
+/* =========================================================
+   STORAGE STATS
 
-  return uploadFile(req, res);
-});
+   Keep before /:id routes.
+========================================================= */
 
-// IMPORTANT: keep this BEFORE /:id/download
-router.get("/stats", getStorageStats);
+router.get(
+  "/stats",
+  getStorageStats
+);
 
-router.get("/", getFiles);
+/* =========================================================
+   GET FILES
+========================================================= */
 
-router.get("/:id/download", downloadFile);
+router.get(
+  "/",
+  getFiles
+);
 
-router.delete("/:id", deleteFile);
+/* =========================================================
+   RENAME FILE
+
+   Owner + Editor
+   Viewer → 403
+========================================================= */
+
+router.patch(
+  "/:id",
+  requireEditorAccess("file"),
+  renameFile
+);
+
+
+router.patch(
+  "/:id/move",
+  requireEditorAccess("file"),
+  moveFile
+);
+
+/* =========================================================
+   DOWNLOAD FILE
+========================================================= */
+
+router.get(
+  "/:id/download",
+  downloadFile
+);
+
+/* =========================================================
+   DELETE FILE
+========================================================= */
+
+router.delete(
+  "/:id",
+  deleteFile
+);
 
 module.exports = router;
