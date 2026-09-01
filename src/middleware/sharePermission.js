@@ -6,10 +6,8 @@ const { pool } = require("../config/database");
  * Returns:
  * {
  *   hasAccess: true,
- *   role: "viewer" | "editor"
+ *   role: "owner" | "viewer" | "editor"
  * }
- *
- * Owner automatically has editor-level access.
  */
 
 const getResourcePermission = async (
@@ -21,131 +19,142 @@ const getResourcePermission = async (
     return null;
   }
 
-  /*
-   * FILE
-   */
-  if (resourceType === "file") {
-    // Owner
-    const ownerResult = await pool.query(
-      `SELECT id
-       FROM files
-       WHERE id = $1
-         AND owner_id = $2
-         AND is_deleted = FALSE`,
-      [resourceId, userId]
-    );
+  try {
+    /* =====================================================
+       FILE
+    ===================================================== */
 
-    if (ownerResult.rows.length > 0) {
-      return {
-        hasAccess: true,
-        role: "owner",
-      };
+    if (resourceType === "file") {
+      const result = await pool.query(
+        `SELECT
+           f.owner_id,
+           COALESCE(s.role, NULL) AS shared_role
+         FROM files f
+         LEFT JOIN shares s
+           ON s.resource_type = 'file'
+          AND s.resource_id = f.id
+          AND s.grantee_user_id = $2
+         WHERE f.id = $1
+           AND f.is_deleted = FALSE`,
+        [resourceId, userId]
+      );
+
+      if (result.rows.length === 0) {
+        return null;
+      }
+
+      const file = result.rows[0];
+
+      if (file.owner_id === userId) {
+        return {
+          hasAccess: true,
+          role: "owner",
+        };
+      }
+
+      if (file.shared_role) {
+        return {
+          hasAccess: true,
+          role: file.shared_role,
+        };
+      }
+
+      /*
+       * Check whether the file is inside
+       * a folder shared with this user.
+       */
+      const folderResult = await pool.query(
+        `SELECT s.role
+         FROM files f
+         JOIN folders folder
+           ON folder.id = f.folder_id
+         JOIN shares s
+           ON s.resource_type = 'folder'
+          AND s.resource_id = folder.id
+          AND s.grantee_user_id = $2
+         WHERE f.id = $1
+           AND f.is_deleted = FALSE
+           AND folder.is_deleted = FALSE`,
+        [resourceId, userId]
+      );
+
+      if (folderResult.rows.length > 0) {
+        return {
+          hasAccess: true,
+          role: folderResult.rows[0].role,
+        };
+      }
+
+      return null;
     }
 
-    // Direct file share
-    const directShare = await pool.query(
-      `SELECT s.role
-       FROM shares s
-       JOIN files f
-         ON f.id = s.resource_id
-       WHERE s.resource_type = 'file'
-         AND s.resource_id = $1
-         AND s.grantee_user_id = $2
-         AND f.is_deleted = FALSE`,
-      [resourceId, userId]
-    );
+    /* =====================================================
+       FOLDER
+    ===================================================== */
 
-    if (directShare.rows.length > 0) {
-      return {
-        hasAccess: true,
-        role: directShare.rows[0].role,
-      };
-    }
+    if (resourceType === "folder") {
+      const result = await pool.query(
+        `SELECT
+           f.owner_id,
+           s.role AS shared_role
+         FROM folders f
+         LEFT JOIN shares s
+           ON s.resource_type = 'folder'
+          AND s.resource_id = f.id
+          AND s.grantee_user_id = $2
+         WHERE f.id = $1
+           AND f.is_deleted = FALSE`,
+        [resourceId, userId]
+      );
 
-    // File inside a shared folder
-    const folderShare = await pool.query(
-      `SELECT s.role
-       FROM files f
-       JOIN folders folder
-         ON folder.id = f.folder_id
-       JOIN shares s
-         ON s.resource_type = 'folder'
-        AND s.resource_id = folder.id
-       WHERE f.id = $1
-         AND s.grantee_user_id = $2
-         AND f.is_deleted = FALSE
-         AND folder.is_deleted = FALSE`,
-      [resourceId, userId]
-    );
+      if (result.rows.length === 0) {
+        return null;
+      }
 
-    if (folderShare.rows.length > 0) {
-      return {
-        hasAccess: true,
-        role: folderShare.rows[0].role,
-      };
+      const folder = result.rows[0];
+
+      /*
+       * Owner gets full access.
+       */
+      if (folder.owner_id === userId) {
+        return {
+          hasAccess: true,
+          role: "owner",
+        };
+      }
+
+      /*
+       * Direct share.
+       */
+      if (folder.shared_role) {
+        return {
+          hasAccess: true,
+          role: folder.shared_role,
+        };
+      }
+
+      return null;
     }
 
     return null;
-  }
-
-  /*
-   * FOLDER
-   */
-  if (resourceType === "folder") {
-    // Owner
-    const ownerResult = await pool.query(
-      `SELECT id
-       FROM folders
-       WHERE id = $1
-         AND owner_id = $2
-         AND is_deleted = FALSE`,
-      [resourceId, userId]
+  } catch (error) {
+    console.error(
+      "getResourcePermission database error:",
+      error
     );
 
-    if (ownerResult.rows.length > 0) {
-      return {
-        hasAccess: true,
-        role: "owner",
-      };
-    }
-
-    // Direct folder share
-    const shareResult = await pool.query(
-      `SELECT s.role
-       FROM shares s
-       JOIN folders f
-         ON f.id = s.resource_id
-       WHERE s.resource_type = 'folder'
-         AND s.resource_id = $1
-         AND s.grantee_user_id = $2
-         AND f.is_deleted = FALSE`,
-      [resourceId, userId]
-    );
-
-    if (shareResult.rows.length > 0) {
-      return {
-        hasAccess: true,
-        role: shareResult.rows[0].role,
-      };
-    }
-
+    /*
+     * Return null instead of throwing.
+     * This prevents the middleware from producing
+     * a misleading 500 when permission cannot be found.
+     */
     return null;
   }
-
-  return null;
 };
 
-/*
- * Middleware factory.
- *
- * Usage:
- *
- * router.patch(
- *   "/:id",
- *   requireEditorAccess("file"),
- *   renameFile
- * );
- */
+/* =========================================================
+   EDITOR ACCESS
+========================================================= */
 
 const requireEditorAccess = (resourceType) => {
   return async (req, res, next) => {
@@ -162,12 +171,11 @@ const requireEditorAccess = (resourceType) => {
         });
       }
 
-      const permission =
-        await getResourcePermission(
-          userId,
-          resourceType,
-          resourceId
-        );
+      const permission = await getResourcePermission(
+        userId,
+        resourceType,
+        resourceId
+      );
 
       if (!permission) {
         return res.status(404).json({
@@ -191,9 +199,6 @@ const requireEditorAccess = (resourceType) => {
         });
       }
 
-      /*
-       * Make permission available to the controller.
-       */
       req.resourcePermission = permission;
 
       next();
@@ -214,11 +219,10 @@ const requireEditorAccess = (resourceType) => {
   };
 };
 
-/*
- * Viewer OR Editor access.
- *
- * Useful for operations such as preview/download.
- */
+/* =========================================================
+   SHARED ACCESS
+   Viewer OR Editor
+========================================================= */
 
 const requireSharedAccess = (resourceType) => {
   return async (req, res, next) => {
@@ -226,12 +230,20 @@ const requireSharedAccess = (resourceType) => {
       const userId = req.user.userId;
       const resourceId = req.params.id;
 
-      const permission =
-        await getResourcePermission(
-          userId,
-          resourceType,
-          resourceId
-        );
+      if (!resourceId) {
+        return res.status(400).json({
+          error: {
+            code: "RESOURCE_ID_REQUIRED",
+            message: "Resource ID is required",
+          },
+        });
+      }
+
+      const permission = await getResourcePermission(
+        userId,
+        resourceType,
+        resourceId
+      );
 
       if (!permission) {
         return res.status(404).json({
