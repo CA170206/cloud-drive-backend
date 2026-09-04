@@ -1,5 +1,6 @@
 const fs = require("fs");
 const path = require("path");
+const crypto = require("crypto");
 
 const { pool } = require("../config/database");
 const {
@@ -629,6 +630,518 @@ const deleteFile = async (req, res) => {
   }
 };
 
+
+/* =========================================================
+   FILE VERSIONING
+========================================================= */
+
+const calculateChecksum = (filePath) => {
+  return new Promise((resolve, reject) => {
+    const hash = crypto.createHash("sha256");
+    const stream = fs.createReadStream(filePath);
+
+    stream.on("data", (chunk) => hash.update(chunk));
+    stream.on("end", () => resolve(hash.digest("hex")));
+    stream.on("error", reject);
+  });
+};
+
+const uploadNewVersion = async (req, res) => {
+  const client = await pool.connect();
+
+  try {
+    const userId = req.user.userId;
+    const { id } = req.params;
+
+    if (!req.file) {
+      return res.status(400).json({
+        error: {
+          code: "FILE_REQUIRED",
+          message: "Please select a file to upload",
+        },
+      });
+    }
+
+    const permission = await getResourcePermission(
+      userId,
+      "file",
+      id
+    );
+
+    if (!permission) {
+      try { fs.unlinkSync(req.file.path); } catch {}
+      return res.status(404).json({
+        error: {
+          code: "FILE_NOT_FOUND",
+          message: "File not found",
+        },
+      });
+    }
+
+    if (
+      permission.role !== "owner" &&
+      permission.role !== "editor"
+    ) {
+      try { fs.unlinkSync(req.file.path); } catch {}
+      return res.status(403).json({
+        error: {
+          code: "FORBIDDEN",
+          message: "You only have viewer permission for this file",
+        },
+      });
+    }
+
+    const fileResult = await client.query(
+      `SELECT
+         id,
+         name,
+         mime_type,
+         size_bytes,
+         storage_key,
+         owner_id,
+         is_deleted
+       FROM files
+       WHERE id = $1
+         AND is_deleted = FALSE`,
+      [id]
+    );
+
+    if (fileResult.rows.length === 0) {
+      try { fs.unlinkSync(req.file.path); } catch {}
+      return res.status(404).json({
+        error: {
+          code: "FILE_NOT_FOUND",
+          message: "File not found",
+        },
+      });
+    }
+
+    const currentFile = fileResult.rows[0];
+    const checksum = await calculateChecksum(req.file.path);
+
+    await client.query("BEGIN");
+
+    const versionResult = await client.query(
+      `SELECT COALESCE(MAX(version_number), 0)::int AS max_version
+       FROM file_versions
+       WHERE file_id = $1`,
+      [id]
+    );
+
+    let nextVersion = versionResult.rows[0].max_version + 1;
+
+    /*
+     * The original upload is not stored in file_versions.
+     * When creating the first version, preserve the current
+     * file as version 1 before storing the new version.
+     */
+    if (nextVersion === 1) {
+      let currentChecksum = null;
+      const currentPath = path.join(
+        uploadsDir,
+        currentFile.storage_key
+      );
+
+      if (fs.existsSync(currentPath)) {
+        try {
+          currentChecksum = await calculateChecksum(currentPath);
+        } catch {}
+      }
+
+      await client.query(
+        `INSERT INTO file_versions
+         (file_id, version_number, storage_key, size_bytes, checksum)
+         VALUES ($1, $2, $3, $4, $5)`,
+        [
+          id,
+          1,
+          currentFile.storage_key,
+          currentFile.size_bytes,
+          currentChecksum,
+        ]
+      );
+
+      nextVersion = 2;
+    }
+
+    await client.query(
+      `INSERT INTO file_versions
+       (file_id, version_number, storage_key, size_bytes, checksum)
+       VALUES ($1, $2, $3, $4, $5)`,
+      [
+        id,
+        nextVersion,
+        req.file.filename,
+        req.file.size,
+        checksum,
+      ]
+    );
+
+    const updatedFile = await client.query(
+      `UPDATE files
+       SET name = $1,
+           mime_type = $2,
+           size_bytes = $3,
+           storage_key = $4,
+           updated_at = NOW()
+       WHERE id = $5
+         AND is_deleted = FALSE
+       RETURNING
+         id,
+         name,
+         mime_type,
+         size_bytes,
+         owner_id,
+         folder_id,
+         created_at,
+         updated_at`,
+      [
+        req.file.originalname,
+        req.file.mimetype,
+        req.file.size,
+        req.file.filename,
+        id,
+      ]
+    );
+
+    await client.query("COMMIT");
+
+    return res.status(201).json({
+      success: true,
+      message: `Version ${nextVersion} uploaded successfully`,
+      version: {
+        versionNumber: nextVersion,
+        sizeBytes: req.file.size,
+        checksum,
+        createdAt: new Date(),
+      },
+      file: updatedFile.rows[0],
+    });
+  } catch (error) {
+    await client.query("ROLLBACK").catch(() => {});
+
+    if (req.file?.path) {
+      try { fs.unlinkSync(req.file.path); } catch {}
+    }
+
+    console.error("Upload new version error:", error);
+
+    return res.status(500).json({
+      error: {
+        code: "INTERNAL_ERROR",
+        message: "Unable to upload new file version",
+      },
+    });
+  } finally {
+    client.release();
+  }
+};
+
+const getFileVersions = async (req, res) => {
+  try {
+    const userId = req.user.userId;
+    const { id } = req.params;
+
+    const permission = await getResourcePermission(
+      userId,
+      "file",
+      id
+    );
+
+    if (!permission) {
+      return res.status(404).json({
+        error: {
+          code: "FILE_NOT_FOUND",
+          message: "File not found",
+        },
+      });
+    }
+
+    const result = await pool.query(
+      `SELECT
+         id,
+         file_id,
+         version_number,
+         size_bytes,
+         checksum,
+         created_at
+       FROM file_versions
+       WHERE file_id = $1
+       ORDER BY version_number DESC`,
+      [id]
+    );
+
+    return res.status(200).json({
+      success: true,
+      versions: result.rows,
+    });
+  } catch (error) {
+    console.error("Get file versions error:", error);
+
+    return res.status(500).json({
+      error: {
+        code: "INTERNAL_ERROR",
+        message: "Unable to fetch file versions",
+      },
+    });
+  }
+};
+
+const downloadFileVersion = async (req, res) => {
+  try {
+    const userId = req.user.userId;
+    const { id, versionId } = req.params;
+
+    const permission = await getResourcePermission(
+      userId,
+      "file",
+      id
+    );
+
+    if (!permission) {
+      return res.status(404).json({
+        error: {
+          code: "FILE_NOT_FOUND",
+          message: "File not found",
+        },
+      });
+    }
+
+    const result = await pool.query(
+      `SELECT
+         fv.version_number,
+         fv.storage_key,
+         f.name,
+         f.mime_type
+       FROM file_versions fv
+       JOIN files f ON f.id = fv.file_id
+       WHERE fv.id = $1
+         AND fv.file_id = $2`,
+      [versionId, id]
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({
+        error: {
+          code: "VERSION_NOT_FOUND",
+          message: "File version not found",
+        },
+      });
+    }
+
+    const version = result.rows[0];
+    const filePath = path.join(
+      uploadsDir,
+      version.storage_key
+    );
+
+    if (!fs.existsSync(filePath)) {
+      return res.status(404).json({
+        error: {
+          code: "STORAGE_FILE_NOT_FOUND",
+          message: "Stored version file not found",
+        },
+      });
+    }
+
+    return res.download(
+      filePath,
+      version.name
+    );
+  } catch (error) {
+    console.error("Download file version error:", error);
+
+    return res.status(500).json({
+      error: {
+        code: "INTERNAL_ERROR",
+        message: "Unable to download file version",
+      },
+    });
+  }
+};
+
+const restoreFileVersion = async (req, res) => {
+  const client = await pool.connect();
+
+  try {
+    const userId = req.user.userId;
+    const { id, versionId } = req.params;
+
+    const permission = await getResourcePermission(
+      userId,
+      "file",
+      id
+    );
+
+    if (!permission) {
+      return res.status(404).json({
+        error: {
+          code: "FILE_NOT_FOUND",
+          message: "File not found",
+        },
+      });
+    }
+
+    if (
+      permission.role !== "owner" &&
+      permission.role !== "editor"
+    ) {
+      return res.status(403).json({
+        error: {
+          code: "FORBIDDEN",
+          message: "You only have viewer permission for this file",
+        },
+      });
+    }
+
+    const versionResult = await client.query(
+      `SELECT
+         fv.id,
+         fv.version_number,
+         fv.storage_key,
+         fv.size_bytes,
+         f.name,
+         f.mime_type
+       FROM file_versions fv
+       JOIN files f ON f.id = fv.file_id
+       WHERE fv.id = $1
+         AND fv.file_id = $2
+         AND f.is_deleted = FALSE`,
+      [versionId, id]
+    );
+
+    if (versionResult.rows.length === 0) {
+      return res.status(404).json({
+        error: {
+          code: "VERSION_NOT_FOUND",
+          message: "File version not found",
+        },
+      });
+    }
+
+    const version = versionResult.rows[0];
+    const versionPath = path.join(
+      uploadsDir,
+      version.storage_key
+    );
+
+    if (!fs.existsSync(versionPath)) {
+      return res.status(404).json({
+        error: {
+          code: "STORAGE_FILE_NOT_FOUND",
+          message: "Stored version file not found",
+        },
+      });
+    }
+
+    await client.query("BEGIN");
+
+    /*
+     * Keep the current file in history before switching
+     * to an older version if it is not already represented.
+     */
+    const currentResult = await client.query(
+      `SELECT
+         storage_key,
+         size_bytes
+       FROM files
+       WHERE id = $1
+         AND is_deleted = FALSE`,
+      [id]
+    );
+
+    const current = currentResult.rows[0];
+
+    const currentVersionResult = await client.query(
+      `SELECT id
+       FROM file_versions
+       WHERE file_id = $1
+         AND storage_key = $2
+       LIMIT 1`,
+      [id, current.storage_key]
+    );
+
+    if (currentVersionResult.rows.length === 0) {
+      const maxResult = await client.query(
+        `SELECT COALESCE(MAX(version_number), 0)::int AS max_version
+         FROM file_versions
+         WHERE file_id = $1`,
+        [id]
+      );
+
+      let newVersionNumber = maxResult.rows[0].max_version + 1;
+      let currentChecksum = null;
+      const currentPath = path.join(
+        uploadsDir,
+        current.storage_key
+      );
+
+      if (fs.existsSync(currentPath)) {
+        try {
+          currentChecksum = await calculateChecksum(currentPath);
+        } catch {}
+      }
+
+      await client.query(
+        `INSERT INTO file_versions
+         (file_id, version_number, storage_key, size_bytes, checksum)
+         VALUES ($1, $2, $3, $4, $5)`,
+        [
+          id,
+          newVersionNumber,
+          current.storage_key,
+          current.size_bytes,
+          currentChecksum,
+        ]
+      );
+    }
+
+    const updatedFile = await client.query(
+      `UPDATE files
+       SET storage_key = $1,
+           size_bytes = $2,
+           updated_at = NOW()
+       WHERE id = $3
+         AND is_deleted = FALSE
+       RETURNING
+         id,
+         name,
+         mime_type,
+         size_bytes,
+         owner_id,
+         folder_id,
+         created_at,
+         updated_at`,
+      [
+        version.storage_key,
+        version.size_bytes,
+        id,
+      ]
+    );
+
+    await client.query("COMMIT");
+
+    return res.status(200).json({
+      success: true,
+      message: `Version ${version.version_number} restored successfully`,
+      file: updatedFile.rows[0],
+    });
+  } catch (error) {
+    await client.query("ROLLBACK").catch(() => {});
+
+    console.error("Restore file version error:", error);
+
+    return res.status(500).json({
+      error: {
+        code: "INTERNAL_ERROR",
+        message: "Unable to restore file version",
+      },
+    });
+  } finally {
+    client.release();
+  }
+};
+
 /* =========================================================
    EXPORTS
 ========================================================= */
@@ -932,4 +1445,8 @@ module.exports = {
   getTrash,
   restoreFile,
   restoreFolder,
+  uploadNewVersion,
+  getFileVersions,
+  downloadFileVersion,
+  restoreFileVersion,
 };

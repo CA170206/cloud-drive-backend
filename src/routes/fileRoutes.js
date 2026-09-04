@@ -16,6 +16,10 @@ const {
   restoreFile,
   restoreFolder,
   searchFilesAndFolders,
+  uploadNewVersion,
+  getFileVersions,
+  downloadFileVersion,
+  restoreFileVersion,
 } = require("../controllers/fileController");
 
 const {
@@ -88,6 +92,48 @@ router.post(
 );
 
 /* =========================================================
+   FILE VERSIONING
+========================================================= */
+
+router.post(
+  "/:id/versions",
+  upload.any(),
+  (req, res) => {
+    if (
+      !req.files ||
+      req.files.length === 0
+    ) {
+      return res.status(400).json({
+        error: {
+          code: "FILE_REQUIRED",
+          message:
+            "Please select a file to upload",
+        },
+      });
+    }
+
+    req.file = req.files[0];
+
+    return uploadNewVersion(req, res);
+  }
+);
+
+router.get(
+  "/:id/versions",
+  getFileVersions
+);
+
+router.get(
+  "/:id/versions/:versionId/download",
+  downloadFileVersion
+);
+
+router.post(
+  "/:id/versions/:versionId/restore",
+  restoreFileVersion
+);
+
+/* =========================================================
    STORAGE STATS
 
    Keep before /:id routes.
@@ -119,7 +165,6 @@ router.patch(
   requireEditorAccess("file"),
   renameFile
 );
-
 
 router.patch(
   "/:id/move",

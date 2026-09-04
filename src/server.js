@@ -12,6 +12,8 @@ const authRoutes = require("./routes/authRoutes");
 const folderRoutes = require("./routes/folderRoutes");
 const fileRoutes = require("./routes/fileRoutes");
 const shareRoutes = require("./routes/shareRoutes");
+const starRoutes = require("./routes/starRoutes");
+const activityRoutes = require("./routes/activityRoutes");
 
 const app = express();
 const PORT = process.env.PORT || 5000;
@@ -35,6 +37,8 @@ app.use("/api/auth", authRoutes);
 app.use("/api/folders", folderRoutes);
 app.use("/api/files", fileRoutes);
 app.use("/api/shares", shareRoutes);
+app.use("/api/stars", starRoutes);
+app.use("/api/activities", activityRoutes);
 
 // Health check
 app.get("/api/health", (req, res) => {
@@ -55,17 +59,13 @@ const startServer = async () => {
       );
     });
   } catch (error) {
-    console.error("❌ Failed to start server:", error.message);
+    console.error(
+      "❌ Failed to start server:",
+      error.message
+    );
+
     process.exit(1);
   }
 };
-
-
-// Add this to backend/src/server.js
-
-const starRoutes = require("./routes/starRoutes");
-
-app.use("/api/stars", starRoutes);
-
 
 startServer();
