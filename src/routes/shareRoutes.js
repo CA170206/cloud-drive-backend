@@ -18,6 +18,10 @@ const {
 } = require("../controllers/shareController");
 
 const {
+  secureDownloadPath,
+} = require("../middleware/secureDownload");
+
+const {
   validate,
   createShareSchema,
   resourceQuerySchema,
@@ -49,6 +53,9 @@ router.get(
     query:
       publicLinkPasswordQuerySchema,
   }),
+  secureDownloadPath(
+    "public"
+  ),
   accessPublicLink
 );
 
@@ -56,7 +63,9 @@ router.get(
    AUTHENTICATED ROUTES
 ========================================================= */
 
-router.use(authMiddleware);
+router.use(
+  authMiddleware
+);
 
 /* =========================================================
    CREATE / UPDATE SHARE
@@ -65,7 +74,8 @@ router.use(authMiddleware);
 router.post(
   "/",
   validate({
-    body: createShareSchema,
+    body:
+      createShareSchema,
   }),
   createShare
 );
@@ -77,7 +87,8 @@ router.post(
 router.get(
   "/permission",
   validate({
-    query: resourceQuerySchema,
+    query:
+      resourceQuerySchema,
   }),
   checkPermission
 );
@@ -89,7 +100,8 @@ router.get(
 router.post(
   "/public",
   validate({
-    body: createPublicLinkSchema,
+    body:
+      createPublicLinkSchema,
   }),
   createPublicLink
 );
@@ -101,7 +113,8 @@ router.post(
 router.get(
   "/public",
   validate({
-    query: resourceQuerySchema,
+    query:
+      resourceQuerySchema,
   }),
   getPublicLinks
 );
@@ -113,7 +126,8 @@ router.get(
 router.delete(
   "/public/:id",
   validate({
-    params: shareIdParamsSchema,
+    params:
+      shareIdParamsSchema,
   }),
   deletePublicLink
 );
@@ -141,7 +155,7 @@ router.get(
 );
 
 /* =========================================================
-   DOWNLOAD SHARED FILE
+   SECURE SHARED FILE DOWNLOAD
 ========================================================= */
 
 router.get(
@@ -150,11 +164,14 @@ router.get(
     params:
       sharedFileParamsSchema,
   }),
+  secureDownloadPath(
+    "file"
+  ),
   downloadSharedFile
 );
 
 /* =========================================================
-   REMOVE FROM SHARED WITH ME
+   REMOVE SHARED RESOURCE
 ========================================================= */
 
 router.delete(
@@ -173,13 +190,14 @@ router.delete(
 router.get(
   "/",
   validate({
-    query: resourceQuerySchema,
+    query:
+      resourceQuerySchema,
   }),
   getResourceShares
 );
 
 /* =========================================================
-   OWNER REMOVES SHARE
+   DELETE SHARE
 ========================================================= */
 
 router.delete(

@@ -29,6 +29,10 @@ const {
 } = require("../middleware/sharePermission");
 
 const {
+  secureDownloadPath,
+} = require("../middleware/secureDownload");
+
+const {
   validate,
   fileIdParamsSchema,
   fileVersionParamsSchema,
@@ -48,144 +52,84 @@ const router = express.Router();
 const MAX_FILE_SIZE =
   50 * 1024 * 1024;
 
-const MAX_FILENAME_LENGTH = 255;
+const MAX_FILENAME_LENGTH =
+  255;
 
-/*
- * Executable/script extensions are blocked.
- *
- * Cloud Drive stores user files and does not need to
- * execute uploaded files on the server.
- */
-const blockedExtensions = new Set([
-  ".exe",
-  ".dll",
-  ".com",
-  ".msi",
-  ".scr",
-  ".bat",
-  ".cmd",
-  ".ps1",
-  ".psm1",
-  ".vbs",
-  ".vbe",
-  ".js",
-  ".jse",
-  ".mjs",
-  ".cjs",
-  ".jar",
-  ".sh",
-  ".bash",
-  ".zsh",
-  ".php",
-  ".php3",
-  ".php4",
-  ".php5",
-  ".phtml",
-  ".cgi",
-  ".pl",
-  ".py",
-  ".rb",
-  ".asp",
-  ".aspx",
-  ".jsp",
-  ".war",
-  ".hta",
-]);
+const blockedExtensions =
+  new Set([
+    ".exe",
+    ".dll",
+    ".com",
+    ".msi",
+    ".scr",
+    ".bat",
+    ".cmd",
+    ".ps1",
+    ".psm1",
+    ".vbs",
+    ".vbe",
+    ".js",
+    ".jse",
+    ".mjs",
+    ".cjs",
+    ".jar",
+    ".sh",
+    ".bash",
+    ".zsh",
+    ".php",
+    ".php3",
+    ".php4",
+    ".php5",
+    ".phtml",
+    ".cgi",
+    ".pl",
+    ".py",
+    ".rb",
+    ".asp",
+    ".aspx",
+    ".jsp",
+    ".war",
+    ".hta",
+  ]);
 
-/*
- * MIME types which we explicitly understand.
- *
- * application/octet-stream is intentionally allowed for
- * files whose MIME type cannot be reliably determined by
- * the client. The extension is still checked separately.
- */
 const mimeByExtension = {
-  ".jpg": [
-    "image/jpeg",
-  ],
-
-  ".jpeg": [
-    "image/jpeg",
-  ],
-
-  ".png": [
-    "image/png",
-  ],
-
-  ".gif": [
-    "image/gif",
-  ],
-
-  ".webp": [
-    "image/webp",
-  ],
-
-  ".pdf": [
-    "application/pdf",
-  ],
-
-  ".txt": [
-    "text/plain",
-  ],
-
+  ".jpg": ["image/jpeg"],
+  ".jpeg": ["image/jpeg"],
+  ".png": ["image/png"],
+  ".gif": ["image/gif"],
+  ".webp": ["image/webp"],
+  ".pdf": ["application/pdf"],
+  ".txt": ["text/plain"],
   ".csv": [
     "text/csv",
     "application/csv",
     "application/vnd.ms-excel",
   ],
-
-  ".json": [
-    "application/json",
-  ],
-
-  ".doc": [
-    "application/msword",
-  ],
-
+  ".json": ["application/json"],
+  ".doc": ["application/msword"],
   ".docx": [
     "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
   ],
-
-  ".xls": [
-    "application/vnd.ms-excel",
-  ],
-
+  ".xls": ["application/vnd.ms-excel"],
   ".xlsx": [
     "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
   ],
-
-  ".ppt": [
-    "application/vnd.ms-powerpoint",
-  ],
-
+  ".ppt": ["application/vnd.ms-powerpoint"],
   ".pptx": [
     "application/vnd.openxmlformats-officedocument.presentationml.presentation",
   ],
-
-  ".zip": [
-    "application/zip",
-  ],
-
-  ".mp3": [
-    "audio/mpeg",
-  ],
-
+  ".zip": ["application/zip"],
+  ".mp3": ["audio/mpeg"],
   ".wav": [
     "audio/wav",
     "audio/x-wav",
   ],
-
-  ".mp4": [
-    "video/mp4",
-  ],
-
-  ".webm": [
-    "video/webm",
-  ],
+  ".mp4": ["video/mp4"],
+  ".webm": ["video/webm"],
 };
 
 /* =========================================================
-   MULTER STORAGE
+   STORAGE
 ========================================================= */
 
 const storage =
@@ -211,7 +155,8 @@ const storage =
     ) => {
       const extension =
         path.extname(
-          file.originalname || ""
+          file.originalname ||
+            ""
         ).toLowerCase();
 
       const uniqueName =
@@ -227,119 +172,236 @@ const storage =
   });
 
 /* =========================================================
-   MULTER FILE FILTER
+   MULTER
 ========================================================= */
 
-const fileFilter = (
-  req,
-  file,
-  cb
-) => {
-  try {
+const upload =
+  multer({
+    storage,
+
+    limits: {
+      fileSize:
+        MAX_FILE_SIZE,
+      files: 1,
+      fields: 10,
+      parts: 11,
+    },
+  });
+
+/* =========================================================
+   DELETE TEMP FILE
+========================================================= */
+
+const deleteUploadedFile =
+  async (file) => {
+    if (!file?.path) {
+      return;
+    }
+
+    try {
+      await fs.promises.unlink(
+        file.path
+      );
+    } catch (error) {
+      if (
+        error.code !==
+        "ENOENT"
+      ) {
+        console.error(
+          "Could not delete rejected upload:",
+          error.message
+        );
+      }
+    }
+  };
+
+/* =========================================================
+   VALIDATE UPLOADED FILE
+========================================================= */
+
+const validateUploadedFile =
+  async (req, res) => {
+    const file =
+      req.file;
+
+    if (!file) {
+      return {
+        valid: false,
+        response:
+          res.status(400).json({
+            error: {
+              code:
+                "FILE_REQUIRED",
+              message:
+                "Please select a file to upload",
+            },
+          }),
+      };
+    }
+
     const originalName =
-      file.originalname || "";
+      file.originalname ||
+      "";
 
     const extension =
       path.extname(
         originalName
       ).toLowerCase();
 
-    /*
-     * Filename must exist.
-     */
     if (!originalName) {
-      return cb(
-        new Error(
-          "Filename is required"
-        ),
-        false
+      await deleteUploadedFile(
+        file
       );
+
+      return {
+        valid: false,
+        response:
+          res.status(400).json({
+            error: {
+              code:
+                "UPLOAD_VALIDATION_ERROR",
+              message:
+                "Filename is required",
+            },
+          }),
+      };
     }
 
-    /*
-     * Reject excessively long filenames.
-     */
     if (
       originalName.length >
       MAX_FILENAME_LENGTH
     ) {
-      return cb(
-        new Error(
-          "Filename must be 255 characters or less"
-        ),
-        false
+      await deleteUploadedFile(
+        file
       );
+
+      return {
+        valid: false,
+        response:
+          res.status(400).json({
+            error: {
+              code:
+                "UPLOAD_VALIDATION_ERROR",
+              message:
+                "Filename must be 255 characters or less",
+            },
+          }),
+      };
     }
 
-    /*
-     * Reject null bytes and control characters.
-     */
     if (
       /[\u0000-\u001F\u007F]/.test(
         originalName
       )
     ) {
-      return cb(
-        new Error(
-          "Filename contains invalid characters"
-        ),
-        false
+      await deleteUploadedFile(
+        file
       );
+
+      return {
+        valid: false,
+        response:
+          res.status(400).json({
+            error: {
+              code:
+                "UPLOAD_VALIDATION_ERROR",
+              message:
+                "Filename contains invalid characters",
+            },
+          }),
+      };
     }
 
-    /*
-     * Reject path separators.
-     *
-     * The server generates its own storage filename,
-     * but user supplied path characters should still
-     * never be accepted.
-     */
     if (
-      originalName.includes("/") ||
-      originalName.includes("\\")
+      originalName.includes(
+        "/"
+      ) ||
+      originalName.includes(
+        "\\"
+      )
     ) {
-      return cb(
-        new Error(
-          "Filename contains an invalid path"
-        ),
-        false
+      await deleteUploadedFile(
+        file
       );
+
+      return {
+        valid: false,
+        response:
+          res.status(400).json({
+            error: {
+              code:
+                "UPLOAD_VALIDATION_ERROR",
+              message:
+                "Filename contains an invalid path",
+            },
+          }),
+      };
     }
 
-    /*
-     * Reject executable/script extensions.
-     */
+    if (!extension) {
+      await deleteUploadedFile(
+        file
+      );
+
+      return {
+        valid: false,
+        response:
+          res.status(400).json({
+            error: {
+              code:
+                "UPLOAD_VALIDATION_ERROR",
+              message:
+                "File extension is required",
+            },
+          }),
+      };
+    }
+
     if (
       blockedExtensions.has(
         extension
       )
     ) {
-      return cb(
-        new Error(
-          "This file type is not allowed"
-        ),
-        false
+      await deleteUploadedFile(
+        file
       );
+
+      return {
+        valid: false,
+        response:
+          res.status(400).json({
+            error: {
+              code:
+                "UPLOAD_VALIDATION_ERROR",
+              message:
+                "This file type is not allowed",
+            },
+          }),
+      };
     }
 
-    /*
-     * An extension is required.
-     */
-    if (!extension) {
-      return cb(
-        new Error(
-          "File extension is required"
-        ),
-        false
+    if (
+      file.size >
+      MAX_FILE_SIZE
+    ) {
+      await deleteUploadedFile(
+        file
       );
+
+      return {
+        valid: false,
+        response:
+          res.status(400).json({
+            error: {
+              code:
+                "UPLOAD_VALIDATION_ERROR",
+              message:
+                "File size must be 50 MB or less",
+            },
+          }),
+      };
     }
 
-    /*
-     * Validate known MIME/extension pairs.
-     *
-     * Unknown MIME types are allowed when the extension
-     * itself is not dangerous.
-     */
     const expectedMimeTypes =
       mimeByExtension[
         extension
@@ -354,95 +416,31 @@ const fileFilter = (
         file.mimetype
       )
     ) {
-      return cb(
-        new Error(
-          "File extension and MIME type do not match"
-        ),
-        false
+      await deleteUploadedFile(
+        file
       );
+
+      return {
+        valid: false,
+        response:
+          res.status(400).json({
+            error: {
+              code:
+                "UPLOAD_VALIDATION_ERROR",
+              message:
+                "File extension and MIME type do not match",
+            },
+          }),
+      };
     }
 
-    cb(null, true);
-  } catch (error) {
-    cb(error, false);
-  }
-};
-
-/* =========================================================
-   MULTER INSTANCE
-========================================================= */
-
-const upload =
-  multer({
-    storage,
-    fileFilter,
-
-    limits: {
-      fileSize:
-        MAX_FILE_SIZE,
-
-      /*
-       * Only one file should be uploaded by each request.
-       */
-      files: 1,
-
-      /*
-       * Prevent excessive multipart fields.
-       */
-      fields: 10,
-
-      /*
-       * One file + up to 10 fields.
-       */
-      parts: 11,
-    },
-  });
-
-/* =========================================================
-   CLEANUP
-========================================================= */
-
-const cleanupUploadedFiles =
-  async (req) => {
-    const files = [];
-
-    if (req.file) {
-      files.push(req.file);
-    }
-
-    if (
-      Array.isArray(req.files)
-    ) {
-      files.push(
-        ...req.files
-      );
-    }
-
-    for (const file of files) {
-      if (
-        file?.path
-      ) {
-        try {
-          await fs.promises.unlink(
-            file.path
-          );
-        } catch (error) {
-          if (
-            error.code !==
-            "ENOENT"
-          ) {
-            console.error(
-              "Could not clean up rejected upload:",
-              error.message
-            );
-          }
-        }
-      }
-    }
+    return {
+      valid: true,
+    };
   };
 
 /* =========================================================
-   UPLOAD MIDDLEWARE
+   PROCESS UPLOAD
 ========================================================= */
 
 const processUpload =
@@ -452,9 +450,20 @@ const processUpload =
       res,
       async (error) => {
         if (error) {
-          await cleanupUploadedFiles(
-            req
-          );
+          if (
+            req.files &&
+            Array.isArray(
+              req.files
+            )
+          ) {
+            for (
+              const file of req.files
+            ) {
+              await deleteUploadedFile(
+                file
+              );
+            }
+          }
 
           if (
             error instanceof
@@ -503,18 +512,29 @@ const processUpload =
           });
         }
 
-        /*
-         * upload.any() stores files in req.files.
-         *
-         * We explicitly enforce exactly zero or one file.
-         */
         if (
-          Array.isArray(req.files) &&
-          req.files.length > 1
+          !Array.isArray(
+            req.files
+          ) ||
+          req.files.length === 0
         ) {
-          await cleanupUploadedFiles(
-            req
-          );
+          req.file =
+            undefined;
+
+          return next();
+        }
+
+        if (
+          req.files.length >
+          1
+        ) {
+          for (
+            const file of req.files
+          ) {
+            await deleteUploadedFile(
+              file
+            );
+          }
 
           return res.status(400).json({
             error: {
@@ -526,57 +546,19 @@ const processUpload =
           });
         }
 
+        req.file =
+          req.files[0];
+
+        const validation =
+          await validateUploadedFile(
+            req,
+            res
+          );
+
         if (
-          Array.isArray(req.files) &&
-          req.files.length === 1
+          !validation.valid
         ) {
-          req.file =
-            req.files[0];
-        }
-
-        /*
-         * Final validation after Multer.
-         */
-        if (req.file) {
-          const originalName =
-            req.file.originalname ||
-            "";
-
-          if (
-            originalName.length >
-            MAX_FILENAME_LENGTH
-          ) {
-            await cleanupUploadedFiles(
-              req
-            );
-
-            return res.status(400).json({
-              error: {
-                code:
-                  "UPLOAD_VALIDATION_ERROR",
-                message:
-                  "Filename must be 255 characters or less",
-              },
-            });
-          }
-
-          if (
-            req.file.size >
-            MAX_FILE_SIZE
-          ) {
-            await cleanupUploadedFiles(
-              req
-            );
-
-            return res.status(400).json({
-              error: {
-                code:
-                  "UPLOAD_VALIDATION_ERROR",
-                message:
-                  "File size must be 50 MB or less",
-              },
-            });
-          }
+          return;
         }
 
         next();
@@ -623,7 +605,7 @@ router.post(
 );
 
 /* =========================================================
-   FILE VERSIONING
+   VERSION UPLOAD
 ========================================================= */
 
 router.post(
@@ -656,6 +638,10 @@ router.post(
   }
 );
 
+/* =========================================================
+   VERSION ROUTES
+========================================================= */
+
 router.get(
   "/:id/versions",
   validate({
@@ -671,6 +657,9 @@ router.get(
     params:
       fileVersionParamsSchema,
   }),
+  secureDownloadPath(
+    "version"
+  ),
   downloadFileVersion
 );
 
@@ -754,6 +743,10 @@ router.patch(
   moveFile
 );
 
+/* =========================================================
+   RESTORE
+========================================================= */
+
 router.patch(
   "/trash/:id/restore",
   validate({
@@ -772,14 +765,25 @@ router.patch(
   restoreFolder
 );
 
+/* =========================================================
+   SECURE NORMAL DOWNLOAD
+========================================================= */
+
 router.get(
   "/:id/download",
   validate({
     params:
       fileIdParamsSchema,
   }),
+  secureDownloadPath(
+    "file"
+  ),
   downloadFile
 );
+
+/* =========================================================
+   DELETE
+========================================================= */
 
 router.delete(
   "/:id",
