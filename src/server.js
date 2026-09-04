@@ -17,9 +17,16 @@ const activityRoutes = require("./routes/activityRoutes");
 
 const app = express();
 const PORT = process.env.PORT || 5000;
-
+const { startTrashCleanup } = require("./jobs/trashCleanup");
+startTrashCleanup();
 // Middleware
-app.use(helmet());
+app.use(
+  helmet({
+    crossOriginResourcePolicy: {
+      policy: "cross-origin",
+    },
+  })
+);
 
 app.use(
   cors({
