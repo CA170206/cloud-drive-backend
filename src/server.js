@@ -6,41 +6,46 @@ const helmet = require("helmet");
 const morgan = require("morgan");
 const cookieParser = require("cookie-parser");
 
-const { connectDatabase } = require("./config/database");
+const {
+  connectDatabase,
+} = require("./config/database");
 
-const authRoutes = require("./routes/authRoutes");
-const folderRoutes = require("./routes/folderRoutes");
-const fileRoutes = require("./routes/fileRoutes");
-const shareRoutes = require("./routes/shareRoutes");
-const starRoutes = require("./routes/starRoutes");
-const activityRoutes = require("./routes/activityRoutes");
+const {
+  startTrashCleanup,
+} = require("./jobs/trashCleanup");
 
 const {
   generalLimiter,
 } = require("./middleware/rateLimiter");
 
 const {
-  startTrashCleanup,
-} = require("./jobs/trashCleanup");
+  errorHandler,
+  notFoundHandler,
+} = require("./middleware/errorHandler");
+
+const authRoutes = require("./routes/authRoutes");
+const fileRoutes = require("./routes/fileRoutes");
+const folderRoutes = require("./routes/folderRoutes");
+const shareRoutes = require("./routes/shareRoutes");
+const starRoutes = require("./routes/starRoutes");
+const activityRoutes = require("./routes/activityRoutes");
 
 const app = express();
 
 const PORT =
   process.env.PORT || 5000;
 
-startTrashCleanup();
-
 /* =========================================================
-   SECURITY MIDDLEWARE
+   SECURITY HEADERS
 ========================================================= */
 
 app.use(
-  helmet({
-    crossOriginResourcePolicy: {
-      policy: "cross-origin",
-    },
-  })
+  helmet()
 );
+
+/* =========================================================
+   CORS
+========================================================= */
 
 app.use(
   cors({
@@ -49,32 +54,58 @@ app.use(
   })
 );
 
-/*
- * Limit JSON request size to reduce oversized request abuse.
- */
+/* =========================================================
+   BODY PARSING
+========================================================= */
+
 app.use(
   express.json({
     limit: "1mb",
   })
 );
 
-app.use(morgan("dev"));
-app.use(cookieParser());
+/* =========================================================
+   REQUEST LOGGING
+========================================================= */
 
-/*
- * General API rate limiter.
- *
- * Specific sensitive endpoints such as authentication
- * and public-link access have stricter limiters in their
- * respective route files.
- */
+app.use(
+  morgan("dev")
+);
+
+/* =========================================================
+   COOKIE PARSER
+========================================================= */
+
+app.use(
+  cookieParser()
+);
+
+/* =========================================================
+   GENERAL API RATE LIMIT
+========================================================= */
+
 app.use(
   "/api",
   generalLimiter
 );
 
 /* =========================================================
-   ROUTES
+   HEALTH CHECK
+========================================================= */
+
+app.get(
+  "/health",
+  (req, res) => {
+    return res.status(200).json({
+      success: true,
+      status: "ok",
+      message: "Cloud Drive API is running",
+    });
+  }
+);
+
+/* =========================================================
+   API ROUTES
 ========================================================= */
 
 app.use(
@@ -83,13 +114,13 @@ app.use(
 );
 
 app.use(
-  "/api/folders",
-  folderRoutes
+  "/api/files",
+  fileRoutes
 );
 
 app.use(
-  "/api/files",
-  fileRoutes
+  "/api/folders",
+  folderRoutes
 );
 
 app.use(
@@ -108,18 +139,20 @@ app.use(
 );
 
 /* =========================================================
-   HEALTH CHECK
+   API 404 HANDLER
 ========================================================= */
 
-app.get(
-  "/api/health",
-  (req, res) => {
-    res.status(200).json({
-      success: true,
-      message:
-        "Cloud Drive API is running",
-    });
-  }
+app.use(
+  "/api",
+  notFoundHandler
+);
+
+/* =========================================================
+   GLOBAL ERROR HANDLER
+========================================================= */
+
+app.use(
+  errorHandler
 );
 
 /* =========================================================
@@ -134,14 +167,16 @@ const startServer = async () => {
       PORT,
       () => {
         console.log(
-          `🚀 Cloud Drive API running on http://localhost:${PORT}`
+          `Server running on port ${PORT}`
         );
       }
     );
+
+    startTrashCleanup();
   } catch (error) {
     console.error(
-      "❌ Failed to start server:",
-      error.message
+      "Failed to start server:",
+      error
     );
 
     process.exit(1);
