@@ -15,6 +15,7 @@ const {
   getTrash,
   restoreFile,
   restoreFolder,
+  searchFilesAndFolders,
 } = require("../controllers/fileController");
 
 const {
@@ -157,6 +158,11 @@ router.get(
 router.delete(
   "/:id",
   deleteFile
+);
+
+router.get(
+  "/search",
+  searchFilesAndFolders
 );
 
 module.exports = router;

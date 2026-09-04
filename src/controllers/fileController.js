@@ -846,10 +846,85 @@ const restoreFolder = async (req, res) => {
 };
 
 
+/* =========================================================
+   SEARCH FILES AND FOLDERS
+========================================================= */
+
+const searchFilesAndFolders = async (req, res) => {
+  try {
+    const ownerId = req.user.userId;
+    const { q = "" } = req.query;
+
+    const query = q.trim();
+
+    if (!query) {
+      return res.status(200).json({
+        success: true,
+        files: [],
+        folders: [],
+      });
+    }
+
+    const searchTerm = `%${query}%`;
+
+    const files = await pool.query(
+      `SELECT
+         id,
+         name,
+         mime_type,
+         size_bytes,
+         owner_id,
+         folder_id,
+         created_at,
+         updated_at
+       FROM files
+       WHERE owner_id = $1
+         AND is_deleted = FALSE
+         AND name ILIKE $2
+       ORDER BY name ASC`,
+      [ownerId, searchTerm]
+    );
+
+    const folders = await pool.query(
+      `SELECT
+         id,
+         name,
+         owner_id,
+         parent_id,
+         is_deleted,
+         created_at,
+         updated_at
+       FROM folders
+       WHERE owner_id = $1
+         AND is_deleted = FALSE
+         AND name ILIKE $2
+       ORDER BY name ASC`,
+      [ownerId, searchTerm]
+    );
+
+    return res.status(200).json({
+      success: true,
+      query,
+      files: files.rows,
+      folders: folders.rows,
+    });
+  } catch (error) {
+    console.error("Search error:", error);
+
+    return res.status(500).json({
+      error: {
+        code: "INTERNAL_ERROR",
+        message: "Unable to search files and folders",
+      },
+    });
+  }
+};
+
 module.exports = {
   uploadFile,
   getFiles,
   getStorageStats,
+  searchFilesAndFolders,
   renameFile,
   moveFile,
   downloadFile,
