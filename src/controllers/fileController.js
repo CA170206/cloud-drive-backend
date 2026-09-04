@@ -10,6 +10,36 @@ const {
 const uploadsDir = path.join(__dirname, "../../uploads");
 
 /* =========================================================
+   PAGINATION HELPER
+========================================================= */
+
+const getPagination = (req) => {
+  const query = req.validatedQuery || req.query || {};
+
+  const rawPage = query.page;
+  const rawLimit = query.limit;
+
+  const page = Math.max(
+    1,
+    Number.parseInt(rawPage || "1", 10) || 1
+  );
+
+  const limit = Math.min(
+    100,
+    Math.max(
+      1,
+      Number.parseInt(rawLimit || "20", 10) || 20
+    )
+  );
+
+  return {
+    page,
+    limit,
+    offset: (page - 1) * limit,
+  };
+};
+
+/* =========================================================
    UPLOAD FILE
 ========================================================= */
 
@@ -110,7 +140,31 @@ const uploadFile = async (req, res) => {
 const getFiles = async (req, res) => {
   try {
     const ownerId = req.user.userId;
-    const { folderId } = req.query;
+
+    const query = req.validatedQuery || req.query || {};
+
+    const folderId = query.folderId;
+
+    const {
+      page,
+      limit,
+      offset,
+    } = getPagination(req);
+
+    const countResult = await pool.query(
+      `SELECT COUNT(*)::int AS total
+       FROM files
+       WHERE owner_id = $1
+         AND is_deleted = FALSE
+         AND (
+           ($2::uuid IS NULL AND folder_id IS NULL)
+           OR folder_id = $2::uuid
+         )`,
+      [ownerId, folderId || null]
+    );
+
+    const total = countResult.rows[0].total;
+    const totalPages = Math.ceil(total / limit);
 
     const result = await pool.query(
       `SELECT
@@ -129,13 +183,28 @@ const getFiles = async (req, res) => {
            ($2::uuid IS NULL AND folder_id IS NULL)
            OR folder_id = $2::uuid
          )
-       ORDER BY name ASC`,
-      [ownerId, folderId || null]
+       ORDER BY name ASC, id ASC
+       LIMIT $3
+       OFFSET $4`,
+      [
+        ownerId,
+        folderId || null,
+        limit,
+        offset,
+      ]
     );
 
     return res.status(200).json({
       success: true,
       files: result.rows,
+      pagination: {
+        page,
+        limit,
+        total,
+        totalPages,
+        hasNextPage: page < totalPages,
+        hasPreviousPage: page > 1,
+      },
     });
   } catch (error) {
     console.error("Get files error:", error);
@@ -237,9 +306,6 @@ const renameFile = async (req, res) => {
       });
     }
 
-    /*
-     * Check owner/editor/viewer permission.
-     */
     const permission =
       await getResourcePermission(
         userId,
@@ -256,9 +322,6 @@ const renameFile = async (req, res) => {
       });
     }
 
-    /*
-     * Viewer cannot rename.
-     */
     if (
       permission.role !== "owner" &&
       permission.role !== "editor"
@@ -331,14 +394,12 @@ const moveFile = async (req, res) => {
     const { id } = req.params;
     const { folderId = null } = req.body;
 
-    /*
-     * Check permission on the file.
-     */
-    const permission = await getResourcePermission(
-      userId,
-      "file",
-      id
-    );
+    const permission =
+      await getResourcePermission(
+        userId,
+        "file",
+        id
+      );
 
     if (!permission) {
       return res.status(404).json({
@@ -349,9 +410,6 @@ const moveFile = async (req, res) => {
       });
     }
 
-    /*
-     * Viewer cannot move files.
-     */
     if (
       permission.role !== "owner" &&
       permission.role !== "editor"
@@ -365,9 +423,6 @@ const moveFile = async (req, res) => {
       });
     }
 
-    /*
-     * Get the file and its owner.
-     */
     const fileResult = await pool.query(
       `SELECT
          id,
@@ -392,10 +447,10 @@ const moveFile = async (req, res) => {
 
     const file = fileResult.rows[0];
 
-    /*
-     * null means move to root.
-     */
-    if (folderId === null || folderId === "") {
+    if (
+      folderId === null ||
+      folderId === ""
+    ) {
       const result = await pool.query(
         `UPDATE files
          SET folder_id = NULL,
@@ -421,11 +476,6 @@ const moveFile = async (req, res) => {
       });
     }
 
-    /*
-     * Destination folder must exist,
-     * belong to the same owner,
-     * and not be deleted.
-     */
     const folderResult = await pool.query(
       `SELECT
          id,
@@ -436,23 +486,26 @@ const moveFile = async (req, res) => {
        WHERE id = $1
          AND owner_id = $2
          AND is_deleted = FALSE`,
-      [folderId, file.owner_id]
+      [
+        folderId,
+        file.owner_id,
+      ]
     );
 
     if (folderResult.rows.length === 0) {
       return res.status(404).json({
         error: {
-          code: "DESTINATION_FOLDER_NOT_FOUND",
+          code:
+            "DESTINATION_FOLDER_NOT_FOUND",
           message:
             "Destination folder not found",
         },
       });
     }
 
-    /*
-     * Don't perform unnecessary move.
-     */
-    if (file.folder_id === folderId) {
+    if (
+      file.folder_id === folderId
+    ) {
       return res.status(400).json({
         error: {
           code: "ALREADY_IN_FOLDER",
@@ -462,9 +515,6 @@ const moveFile = async (req, res) => {
       });
     }
 
-    /*
-     * Move file.
-     */
     const result = await pool.query(
       `UPDATE files
        SET folder_id = $1,
@@ -480,7 +530,10 @@ const moveFile = async (req, res) => {
          folder_id,
          created_at,
          updated_at`,
-      [folderId, id]
+      [
+        folderId,
+        id,
+      ]
     );
 
     if (result.rows.length === 0) {
@@ -553,7 +606,8 @@ const downloadFile = async (req, res) => {
     if (!fs.existsSync(filePath)) {
       return res.status(404).json({
         error: {
-          code: "STORAGE_FILE_NOT_FOUND",
+          code:
+            "STORAGE_FILE_NOT_FOUND",
           message:
             "Stored file not found",
         },
@@ -630,128 +684,215 @@ const deleteFile = async (req, res) => {
   }
 };
 
-
 /* =========================================================
    FILE VERSIONING
 ========================================================= */
 
 const calculateChecksum = (filePath) => {
-  return new Promise((resolve, reject) => {
-    const hash = crypto.createHash("sha256");
-    const stream = fs.createReadStream(filePath);
+  return new Promise(
+    (resolve, reject) => {
+      const hash =
+        crypto.createHash(
+          "sha256"
+        );
 
-    stream.on("data", (chunk) => hash.update(chunk));
-    stream.on("end", () => resolve(hash.digest("hex")));
-    stream.on("error", reject);
-  });
+      const stream =
+        fs.createReadStream(
+          filePath
+        );
+
+      stream.on(
+        "data",
+        (chunk) =>
+          hash.update(chunk)
+      );
+
+      stream.on(
+        "end",
+        () =>
+          resolve(
+            hash.digest("hex")
+          )
+      );
+
+      stream.on(
+        "error",
+        reject
+      );
+    }
+  );
 };
 
-const uploadNewVersion = async (req, res) => {
-  const client = await pool.connect();
+const uploadNewVersion = async (
+  req,
+  res
+) => {
+  const client =
+    await pool.connect();
 
   try {
-    const userId = req.user.userId;
-    const { id } = req.params;
+    const userId =
+      req.user.userId;
+
+    const { id } =
+      req.params;
 
     if (!req.file) {
       return res.status(400).json({
         error: {
-          code: "FILE_REQUIRED",
-          message: "Please select a file to upload",
+          code:
+            "FILE_REQUIRED",
+          message:
+            "Please select a file to upload",
         },
       });
     }
 
-    const permission = await getResourcePermission(
-      userId,
-      "file",
-      id
-    );
+    const permission =
+      await getResourcePermission(
+        userId,
+        "file",
+        id
+      );
 
     if (!permission) {
-      try { fs.unlinkSync(req.file.path); } catch {}
+      try {
+        fs.unlinkSync(
+          req.file.path
+        );
+      } catch {}
+
       return res.status(404).json({
         error: {
-          code: "FILE_NOT_FOUND",
-          message: "File not found",
+          code:
+            "FILE_NOT_FOUND",
+          message:
+            "File not found",
         },
       });
     }
 
     if (
-      permission.role !== "owner" &&
-      permission.role !== "editor"
+      permission.role !==
+        "owner" &&
+      permission.role !==
+        "editor"
     ) {
-      try { fs.unlinkSync(req.file.path); } catch {}
+      try {
+        fs.unlinkSync(
+          req.file.path
+        );
+      } catch {}
+
       return res.status(403).json({
         error: {
           code: "FORBIDDEN",
-          message: "You only have viewer permission for this file",
+          message:
+            "You only have viewer permission for this file",
         },
       });
     }
 
-    const fileResult = await client.query(
-      `SELECT
-         id,
-         name,
-         mime_type,
-         size_bytes,
-         storage_key,
-         owner_id,
-         is_deleted
-       FROM files
-       WHERE id = $1
-         AND is_deleted = FALSE`,
-      [id]
-    );
-
-    if (fileResult.rows.length === 0) {
-      try { fs.unlinkSync(req.file.path); } catch {}
-      return res.status(404).json({
-        error: {
-          code: "FILE_NOT_FOUND",
-          message: "File not found",
-        },
-      });
-    }
-
-    const currentFile = fileResult.rows[0];
-    const checksum = await calculateChecksum(req.file.path);
-
-    await client.query("BEGIN");
-
-    const versionResult = await client.query(
-      `SELECT COALESCE(MAX(version_number), 0)::int AS max_version
-       FROM file_versions
-       WHERE file_id = $1`,
-      [id]
-    );
-
-    let nextVersion = versionResult.rows[0].max_version + 1;
-
-    /*
-     * The original upload is not stored in file_versions.
-     * When creating the first version, preserve the current
-     * file as version 1 before storing the new version.
-     */
-    if (nextVersion === 1) {
-      let currentChecksum = null;
-      const currentPath = path.join(
-        uploadsDir,
-        currentFile.storage_key
+    const fileResult =
+      await client.query(
+        `SELECT
+           id,
+           name,
+           mime_type,
+           size_bytes,
+           storage_key,
+           owner_id,
+           is_deleted
+         FROM files
+         WHERE id = $1
+           AND is_deleted = FALSE`,
+        [id]
       );
 
-      if (fs.existsSync(currentPath)) {
+    if (
+      fileResult.rows.length ===
+      0
+    ) {
+      try {
+        fs.unlinkSync(
+          req.file.path
+        );
+      } catch {}
+
+      return res.status(404).json({
+        error: {
+          code:
+            "FILE_NOT_FOUND",
+          message:
+            "File not found",
+        },
+      });
+    }
+
+    const currentFile =
+      fileResult.rows[0];
+
+    const checksum =
+      await calculateChecksum(
+        req.file.path
+      );
+
+    await client.query(
+      "BEGIN"
+    );
+
+    const versionResult =
+      await client.query(
+        `SELECT
+           COALESCE(
+             MAX(version_number),
+             0
+           )::int AS max_version
+         FROM file_versions
+         WHERE file_id = $1`,
+        [id]
+      );
+
+    let nextVersion =
+      versionResult.rows[0]
+        .max_version + 1;
+
+    if (
+      nextVersion === 1
+    ) {
+      let currentChecksum =
+        null;
+
+      const currentPath =
+        path.join(
+          uploadsDir,
+          currentFile.storage_key
+        );
+
+      if (
+        fs.existsSync(
+          currentPath
+        )
+      ) {
         try {
-          currentChecksum = await calculateChecksum(currentPath);
+          currentChecksum =
+            await calculateChecksum(
+              currentPath
+            );
         } catch {}
       }
 
       await client.query(
         `INSERT INTO file_versions
-         (file_id, version_number, storage_key, size_bytes, checksum)
-         VALUES ($1, $2, $3, $4, $5)`,
+         (
+           file_id,
+           version_number,
+           storage_key,
+           size_bytes,
+           checksum
+         )
+         VALUES
+         ($1, $2, $3, $4, $5)`,
         [
           id,
           1,
@@ -766,8 +907,15 @@ const uploadNewVersion = async (req, res) => {
 
     await client.query(
       `INSERT INTO file_versions
-       (file_id, version_number, storage_key, size_bytes, checksum)
-       VALUES ($1, $2, $3, $4, $5)`,
+       (
+         file_id,
+         version_number,
+         storage_key,
+         size_bytes,
+         checksum
+       )
+       VALUES
+       ($1, $2, $3, $4, $5)`,
       [
         id,
         nextVersion,
@@ -777,59 +925,80 @@ const uploadNewVersion = async (req, res) => {
       ]
     );
 
-    const updatedFile = await client.query(
-      `UPDATE files
-       SET name = $1,
-           mime_type = $2,
-           size_bytes = $3,
-           storage_key = $4,
-           updated_at = NOW()
-       WHERE id = $5
-         AND is_deleted = FALSE
-       RETURNING
-         id,
-         name,
-         mime_type,
-         size_bytes,
-         owner_id,
-         folder_id,
-         created_at,
-         updated_at`,
-      [
-        req.file.originalname,
-        req.file.mimetype,
-        req.file.size,
-        req.file.filename,
-        id,
-      ]
-    );
+    const updatedFile =
+      await client.query(
+        `UPDATE files
+         SET name = $1,
+             mime_type = $2,
+             size_bytes = $3,
+             storage_key = $4,
+             updated_at = NOW()
+         WHERE id = $5
+           AND is_deleted = FALSE
+         RETURNING
+           id,
+           name,
+           mime_type,
+           size_bytes,
+           owner_id,
+           folder_id,
+           created_at,
+           updated_at`,
+        [
+          req.file.originalname,
+          req.file.mimetype,
+          req.file.size,
+          req.file.filename,
+          id,
+        ]
+      );
 
-    await client.query("COMMIT");
+    await client.query(
+      "COMMIT"
+    );
 
     return res.status(201).json({
       success: true,
-      message: `Version ${nextVersion} uploaded successfully`,
+      message:
+        `Version ${nextVersion} uploaded successfully`,
       version: {
-        versionNumber: nextVersion,
-        sizeBytes: req.file.size,
+        versionNumber:
+          nextVersion,
+        sizeBytes:
+          req.file.size,
         checksum,
-        createdAt: new Date(),
+        createdAt:
+          new Date(),
       },
-      file: updatedFile.rows[0],
+      file:
+        updatedFile.rows[0],
     });
   } catch (error) {
-    await client.query("ROLLBACK").catch(() => {});
+    await client
+      .query("ROLLBACK")
+      .catch(() => {});
 
-    if (req.file?.path) {
-      try { fs.unlinkSync(req.file.path); } catch {}
+    if (
+      req.file?.path
+    ) {
+      try {
+        fs.unlinkSync(
+          req.file.path
+        );
+      } catch {}
     }
 
-    console.error("Upload new version error:", error);
+    console.error(
+      "Upload new version error:",
+      error
+    );
 
     return res.status(500).json({
       error: {
-        code: "INTERNAL_ERROR",
-        message: "Unable to upload new file version",
+        code:
+          "INTERNAL_ERROR",
+        message:
+          "Unable to upload new file version",
       },
     });
   } finally {
@@ -837,369 +1006,635 @@ const uploadNewVersion = async (req, res) => {
   }
 };
 
-const getFileVersions = async (req, res) => {
-  try {
-    const userId = req.user.userId;
-    const { id } = req.params;
+/* =========================================================
+   GET FILE VERSIONS
+========================================================= */
 
-    const permission = await getResourcePermission(
-      userId,
-      "file",
-      id
-    );
+const getFileVersions = async (
+  req,
+  res
+) => {
+  try {
+    const userId =
+      req.user.userId;
+
+    const { id } =
+      req.params;
+
+    const {
+      page,
+      limit,
+      offset,
+    } = getPagination(req);
+
+    const permission =
+      await getResourcePermission(
+        userId,
+        "file",
+        id
+      );
 
     if (!permission) {
       return res.status(404).json({
         error: {
-          code: "FILE_NOT_FOUND",
-          message: "File not found",
+          code:
+            "FILE_NOT_FOUND",
+          message:
+            "File not found",
         },
       });
     }
 
-    const result = await pool.query(
-      `SELECT
-         id,
-         file_id,
-         version_number,
-         size_bytes,
-         checksum,
-         created_at
-       FROM file_versions
-       WHERE file_id = $1
-       ORDER BY version_number DESC`,
-      [id]
-    );
-
-    return res.status(200).json({
-      success: true,
-      versions: result.rows,
-    });
-  } catch (error) {
-    console.error("Get file versions error:", error);
-
-    return res.status(500).json({
-      error: {
-        code: "INTERNAL_ERROR",
-        message: "Unable to fetch file versions",
-      },
-    });
-  }
-};
-
-const downloadFileVersion = async (req, res) => {
-  try {
-    const userId = req.user.userId;
-    const { id, versionId } = req.params;
-
-    const permission = await getResourcePermission(
-      userId,
-      "file",
-      id
-    );
-
-    if (!permission) {
-      return res.status(404).json({
-        error: {
-          code: "FILE_NOT_FOUND",
-          message: "File not found",
-        },
-      });
-    }
-
-    const result = await pool.query(
-      `SELECT
-         fv.version_number,
-         fv.storage_key,
-         f.name,
-         f.mime_type
-       FROM file_versions fv
-       JOIN files f ON f.id = fv.file_id
-       WHERE fv.id = $1
-         AND fv.file_id = $2`,
-      [versionId, id]
-    );
-
-    if (result.rows.length === 0) {
-      return res.status(404).json({
-        error: {
-          code: "VERSION_NOT_FOUND",
-          message: "File version not found",
-        },
-      });
-    }
-
-    const version = result.rows[0];
-    const filePath = path.join(
-      uploadsDir,
-      version.storage_key
-    );
-
-    if (!fs.existsSync(filePath)) {
-      return res.status(404).json({
-        error: {
-          code: "STORAGE_FILE_NOT_FOUND",
-          message: "Stored version file not found",
-        },
-      });
-    }
-
-    return res.download(
-      filePath,
-      version.name
-    );
-  } catch (error) {
-    console.error("Download file version error:", error);
-
-    return res.status(500).json({
-      error: {
-        code: "INTERNAL_ERROR",
-        message: "Unable to download file version",
-      },
-    });
-  }
-};
-
-const restoreFileVersion = async (req, res) => {
-  const client = await pool.connect();
-
-  try {
-    const userId = req.user.userId;
-    const { id, versionId } = req.params;
-
-    const permission = await getResourcePermission(
-      userId,
-      "file",
-      id
-    );
-
-    if (!permission) {
-      return res.status(404).json({
-        error: {
-          code: "FILE_NOT_FOUND",
-          message: "File not found",
-        },
-      });
-    }
-
-    if (
-      permission.role !== "owner" &&
-      permission.role !== "editor"
-    ) {
-      return res.status(403).json({
-        error: {
-          code: "FORBIDDEN",
-          message: "You only have viewer permission for this file",
-        },
-      });
-    }
-
-    const versionResult = await client.query(
-      `SELECT
-         fv.id,
-         fv.version_number,
-         fv.storage_key,
-         fv.size_bytes,
-         f.name,
-         f.mime_type
-       FROM file_versions fv
-       JOIN files f ON f.id = fv.file_id
-       WHERE fv.id = $1
-         AND fv.file_id = $2
-         AND f.is_deleted = FALSE`,
-      [versionId, id]
-    );
-
-    if (versionResult.rows.length === 0) {
-      return res.status(404).json({
-        error: {
-          code: "VERSION_NOT_FOUND",
-          message: "File version not found",
-        },
-      });
-    }
-
-    const version = versionResult.rows[0];
-    const versionPath = path.join(
-      uploadsDir,
-      version.storage_key
-    );
-
-    if (!fs.existsSync(versionPath)) {
-      return res.status(404).json({
-        error: {
-          code: "STORAGE_FILE_NOT_FOUND",
-          message: "Stored version file not found",
-        },
-      });
-    }
-
-    await client.query("BEGIN");
-
-    /*
-     * Keep the current file in history before switching
-     * to an older version if it is not already represented.
-     */
-    const currentResult = await client.query(
-      `SELECT
-         storage_key,
-         size_bytes
-       FROM files
-       WHERE id = $1
-         AND is_deleted = FALSE`,
-      [id]
-    );
-
-    const current = currentResult.rows[0];
-
-    const currentVersionResult = await client.query(
-      `SELECT id
-       FROM file_versions
-       WHERE file_id = $1
-         AND storage_key = $2
-       LIMIT 1`,
-      [id, current.storage_key]
-    );
-
-    if (currentVersionResult.rows.length === 0) {
-      const maxResult = await client.query(
-        `SELECT COALESCE(MAX(version_number), 0)::int AS max_version
+    const countResult =
+      await pool.query(
+        `SELECT
+           COUNT(*)::int AS total
          FROM file_versions
          WHERE file_id = $1`,
         [id]
       );
 
-      let newVersionNumber = maxResult.rows[0].max_version + 1;
-      let currentChecksum = null;
-      const currentPath = path.join(
-        uploadsDir,
-        current.storage_key
+    const total =
+      countResult.rows[0]
+        .total;
+
+    const totalPages =
+      Math.ceil(
+        total / limit
       );
 
-      if (fs.existsSync(currentPath)) {
-        try {
-          currentChecksum = await calculateChecksum(currentPath);
-        } catch {}
-      }
-
-      await client.query(
-        `INSERT INTO file_versions
-         (file_id, version_number, storage_key, size_bytes, checksum)
-         VALUES ($1, $2, $3, $4, $5)`,
+    const result =
+      await pool.query(
+        `SELECT
+           id,
+           file_id,
+           version_number,
+           size_bytes,
+           checksum,
+           created_at
+         FROM file_versions
+         WHERE file_id = $1
+         ORDER BY
+           version_number DESC
+         LIMIT $2
+         OFFSET $3`,
         [
           id,
-          newVersionNumber,
-          current.storage_key,
-          current.size_bytes,
-          currentChecksum,
+          limit,
+          offset,
         ]
       );
-    }
-
-    const updatedFile = await client.query(
-      `UPDATE files
-       SET storage_key = $1,
-           size_bytes = $2,
-           updated_at = NOW()
-       WHERE id = $3
-         AND is_deleted = FALSE
-       RETURNING
-         id,
-         name,
-         mime_type,
-         size_bytes,
-         owner_id,
-         folder_id,
-         created_at,
-         updated_at`,
-      [
-        version.storage_key,
-        version.size_bytes,
-        id,
-      ]
-    );
-
-    await client.query("COMMIT");
 
     return res.status(200).json({
       success: true,
-      message: `Version ${version.version_number} restored successfully`,
-      file: updatedFile.rows[0],
+      versions:
+        result.rows,
+      pagination: {
+        page,
+        limit,
+        total,
+        totalPages,
+        hasNextPage:
+          page < totalPages,
+        hasPreviousPage:
+          page > 1,
+      },
     });
   } catch (error) {
-    await client.query("ROLLBACK").catch(() => {});
-
-    console.error("Restore file version error:", error);
+    console.error(
+      "Get file versions error:",
+      error
+    );
 
     return res.status(500).json({
       error: {
-        code: "INTERNAL_ERROR",
-        message: "Unable to restore file version",
+        code:
+          "INTERNAL_ERROR",
+        message:
+          "Unable to fetch file versions",
       },
     });
-  } finally {
-    client.release();
   }
 };
 
-/* =========================================================
-   EXPORTS
-========================================================= */
+const downloadFileVersion =
+  async (req, res) => {
+    try {
+      const userId =
+        req.user.userId;
+
+      const {
+        id,
+        versionId,
+      } = req.params;
+
+      const permission =
+        await getResourcePermission(
+          userId,
+          "file",
+          id
+        );
+
+      if (!permission) {
+        return res.status(404).json({
+          error: {
+            code:
+              "FILE_NOT_FOUND",
+            message:
+              "File not found",
+          },
+        });
+      }
+
+      const result =
+        await pool.query(
+          `SELECT
+             fv.version_number,
+             fv.storage_key,
+             f.name,
+             f.mime_type
+           FROM file_versions fv
+           JOIN files f
+             ON f.id = fv.file_id
+           WHERE fv.id = $1
+             AND fv.file_id = $2`,
+          [
+            versionId,
+            id,
+          ]
+        );
+
+      if (
+        result.rows.length ===
+        0
+      ) {
+        return res.status(404).json({
+          error: {
+            code:
+              "VERSION_NOT_FOUND",
+            message:
+              "File version not found",
+          },
+        });
+      }
+
+      const version =
+        result.rows[0];
+
+      const filePath =
+        path.join(
+          uploadsDir,
+          version.storage_key
+        );
+
+      if (
+        !fs.existsSync(
+          filePath
+        )
+      ) {
+        return res.status(404).json({
+          error: {
+            code:
+              "STORAGE_FILE_NOT_FOUND",
+            message:
+              "Stored version file not found",
+          },
+        });
+      }
+
+      return res.download(
+        filePath,
+        version.name
+      );
+    } catch (error) {
+      console.error(
+        "Download file version error:",
+        error
+      );
+
+      return res.status(500).json({
+        error: {
+          code:
+            "INTERNAL_ERROR",
+          message:
+            "Unable to download file version",
+        },
+      });
+    }
+  };
+
+const restoreFileVersion =
+  async (req, res) => {
+    const client =
+      await pool.connect();
+
+    try {
+      const userId =
+        req.user.userId;
+
+      const {
+        id,
+        versionId,
+      } = req.params;
+
+      const permission =
+        await getResourcePermission(
+          userId,
+          "file",
+          id
+        );
+
+      if (!permission) {
+        return res.status(404).json({
+          error: {
+            code:
+              "FILE_NOT_FOUND",
+            message:
+              "File not found",
+          },
+        });
+      }
+
+      if (
+        permission.role !==
+          "owner" &&
+        permission.role !==
+          "editor"
+      ) {
+        return res.status(403).json({
+          error: {
+            code:
+              "FORBIDDEN",
+            message:
+              "You only have viewer permission for this file",
+          },
+        });
+      }
+
+      const versionResult =
+        await client.query(
+          `SELECT
+             fv.id,
+             fv.version_number,
+             fv.storage_key,
+             fv.size_bytes,
+             f.name,
+             f.mime_type
+           FROM file_versions fv
+           JOIN files f
+             ON f.id = fv.file_id
+           WHERE fv.id = $1
+             AND fv.file_id = $2
+             AND f.is_deleted = FALSE`,
+          [
+            versionId,
+            id,
+          ]
+        );
+
+      if (
+        versionResult.rows
+          .length === 0
+      ) {
+        return res.status(404).json({
+          error: {
+            code:
+              "VERSION_NOT_FOUND",
+            message:
+              "File version not found",
+          },
+        });
+      }
+
+      const version =
+        versionResult.rows[0];
+
+      const versionPath =
+        path.join(
+          uploadsDir,
+          version.storage_key
+        );
+
+      if (
+        !fs.existsSync(
+          versionPath
+        )
+      ) {
+        return res.status(404).json({
+          error: {
+            code:
+              "STORAGE_FILE_NOT_FOUND",
+            message:
+              "Stored version file not found",
+          },
+        });
+      }
+
+      await client.query(
+        "BEGIN"
+      );
+
+      const currentResult =
+        await client.query(
+          `SELECT
+             storage_key,
+             size_bytes
+           FROM files
+           WHERE id = $1
+             AND is_deleted = FALSE`,
+          [id]
+        );
+
+      const current =
+        currentResult.rows[0];
+
+      const currentVersionResult =
+        await client.query(
+          `SELECT id
+           FROM file_versions
+           WHERE file_id = $1
+             AND storage_key = $2
+           LIMIT 1`,
+          [
+            id,
+            current.storage_key,
+          ]
+        );
+
+      if (
+        currentVersionResult
+          .rows.length === 0
+      ) {
+        const maxResult =
+          await client.query(
+            `SELECT
+               COALESCE(
+                 MAX(version_number),
+                 0
+               )::int AS max_version
+             FROM file_versions
+             WHERE file_id = $1`,
+            [id]
+          );
+
+        const newVersionNumber =
+          maxResult.rows[0]
+            .max_version + 1;
+
+        let currentChecksum =
+          null;
+
+        const currentPath =
+          path.join(
+            uploadsDir,
+            current.storage_key
+          );
+
+        if (
+          fs.existsSync(
+            currentPath
+          )
+        ) {
+          try {
+            currentChecksum =
+              await calculateChecksum(
+                currentPath
+              );
+          } catch {}
+        }
+
+        await client.query(
+          `INSERT INTO file_versions
+           (
+             file_id,
+             version_number,
+             storage_key,
+             size_bytes,
+             checksum
+           )
+           VALUES
+           ($1, $2, $3, $4, $5)`,
+          [
+            id,
+            newVersionNumber,
+            current.storage_key,
+            current.size_bytes,
+            currentChecksum,
+          ]
+        );
+      }
+
+      const updatedFile =
+        await client.query(
+          `UPDATE files
+           SET storage_key = $1,
+               size_bytes = $2,
+               updated_at = NOW()
+           WHERE id = $3
+             AND is_deleted = FALSE
+           RETURNING
+             id,
+             name,
+             mime_type,
+             size_bytes,
+             owner_id,
+             folder_id,
+             created_at,
+             updated_at`,
+          [
+            version.storage_key,
+            version.size_bytes,
+            id,
+          ]
+        );
+
+      await client.query(
+        "COMMIT"
+      );
+
+      return res.status(200).json({
+        success: true,
+        message:
+          `Version ${version.version_number} restored successfully`,
+        file:
+          updatedFile.rows[0],
+      });
+    } catch (error) {
+      await client
+        .query("ROLLBACK")
+        .catch(() => {});
+
+      console.error(
+        "Restore file version error:",
+        error
+      );
+
+      return res.status(500).json({
+        error: {
+          code:
+            "INTERNAL_ERROR",
+          message:
+            "Unable to restore file version",
+        },
+      });
+    } finally {
+      client.release();
+    }
+  };
 
 /* =========================================================
    GET TRASH
 ========================================================= */
 
-const getTrash = async (req, res) => {
+const getTrash = async (
+  req,
+  res
+) => {
   try {
-    const ownerId = req.user.userId;
+    const ownerId =
+      req.user.userId;
 
-    const files = await pool.query(
-      `SELECT
-         id,
-         name,
-         mime_type,
-         size_bytes,
-         owner_id,
-         folder_id,
-         created_at,
-         updated_at
-       FROM files
-       WHERE owner_id = $1
-         AND is_deleted = TRUE
-       ORDER BY updated_at DESC`,
-      [ownerId]
-    );
+    const {
+      page,
+      limit,
+      offset,
+    } = getPagination(req);
 
-    const folders = await pool.query(
-      `SELECT
-         id,
-         name,
-         owner_id,
-         parent_id,
-         created_at,
-         updated_at
-       FROM folders
-       WHERE owner_id = $1
-         AND is_deleted = TRUE
-       ORDER BY updated_at DESC`,
-      [ownerId]
-    );
+    const fileCountResult =
+      await pool.query(
+        `SELECT
+           COUNT(*)::int AS total
+         FROM files
+         WHERE owner_id = $1
+           AND is_deleted = TRUE`,
+        [ownerId]
+      );
+
+    const folderCountResult =
+      await pool.query(
+        `SELECT
+           COUNT(*)::int AS total
+         FROM folders
+         WHERE owner_id = $1
+           AND is_deleted = TRUE`,
+        [ownerId]
+      );
+
+    const fileTotal =
+      fileCountResult.rows[0]
+        .total;
+
+    const folderTotal =
+      folderCountResult.rows[0]
+        .total;
+
+    const files =
+      await pool.query(
+        `SELECT
+           id,
+           name,
+           mime_type,
+           size_bytes,
+           owner_id,
+           folder_id,
+           created_at,
+           updated_at
+         FROM files
+         WHERE owner_id = $1
+           AND is_deleted = TRUE
+         ORDER BY
+           updated_at DESC,
+           id DESC
+         LIMIT $2
+         OFFSET $3`,
+        [
+          ownerId,
+          limit,
+          offset,
+        ]
+      );
+
+    const folders =
+      await pool.query(
+        `SELECT
+           id,
+           name,
+           owner_id,
+           parent_id,
+           created_at,
+           updated_at
+         FROM folders
+         WHERE owner_id = $1
+           AND is_deleted = TRUE
+         ORDER BY
+           updated_at DESC,
+           id DESC
+         LIMIT $2
+         OFFSET $3`,
+        [
+          ownerId,
+          limit,
+          offset,
+        ]
+      );
+
+    const fileTotalPages =
+      Math.ceil(
+        fileTotal / limit
+      );
+
+    const folderTotalPages =
+      Math.ceil(
+        folderTotal / limit
+      );
 
     return res.status(200).json({
       success: true,
       trash: {
-        files: files.rows,
-        folders: folders.rows,
+        files:
+          files.rows,
+        folders:
+          folders.rows,
+      },
+      pagination: {
+        page,
+        limit,
+        files: {
+          total:
+            fileTotal,
+          totalPages:
+            fileTotalPages,
+          hasNextPage:
+            page <
+            fileTotalPages,
+          hasPreviousPage:
+            page > 1,
+        },
+        folders: {
+          total:
+            folderTotal,
+          totalPages:
+            folderTotalPages,
+          hasNextPage:
+            page <
+            folderTotalPages,
+          hasPreviousPage:
+            page > 1,
+        },
       },
     });
   } catch (error) {
-    console.error("Get trash error:", error);
+    console.error(
+      "Get trash error:",
+      error
+    );
 
     return res.status(500).json({
       error: {
-        code: "INTERNAL_ERROR",
-        message: "Unable to fetch trash",
+        code:
+          "INTERNAL_ERROR",
+        message:
+          "Unable to fetch trash",
       },
     });
   }
@@ -1209,51 +1644,73 @@ const getTrash = async (req, res) => {
    RESTORE FILE
 ========================================================= */
 
-const restoreFile = async (req, res) => {
+const restoreFile = async (
+  req,
+  res
+) => {
   try {
-    const ownerId = req.user.userId;
-    const { id } = req.params;
+    const ownerId =
+      req.user.userId;
 
-    const result = await pool.query(
-      `UPDATE files
-       SET is_deleted = FALSE,
-           updated_at = NOW()
-       WHERE id = $1
-         AND owner_id = $2
-         AND is_deleted = TRUE
-       RETURNING
-         id,
-         name,
-         mime_type,
-         size_bytes,
-         owner_id,
-         folder_id,
-         created_at,
-         updated_at`,
-      [id, ownerId]
-    );
+    const { id } =
+      req.params;
 
-    if (result.rows.length === 0) {
+    const result =
+      await pool.query(
+        `UPDATE files
+         SET is_deleted = FALSE,
+             updated_at = NOW()
+         WHERE id = $1
+           AND owner_id = $2
+           AND is_deleted = TRUE
+         RETURNING
+           id,
+           name,
+           mime_type,
+           size_bytes,
+           owner_id,
+           folder_id,
+           created_at,
+           updated_at`,
+        [
+          id,
+          ownerId,
+        ]
+      );
+
+    if (
+      result.rows.length ===
+      0
+    ) {
       return res.status(404).json({
         error: {
-          code: "FILE_NOT_IN_TRASH",
-          message: "Deleted file not found",
+          code:
+            "FILE_NOT_IN_TRASH",
+          message:
+            "Deleted file not found",
         },
       });
     }
 
     return res.status(200).json({
       success: true,
-      message: "File restored successfully",
-      file: result.rows[0],
+      message:
+        "File restored successfully",
+      file:
+        result.rows[0],
     });
   } catch (error) {
-    console.error("Restore file error:", error);
+    console.error(
+      "Restore file error:",
+      error
+    );
 
     return res.status(500).json({
       error: {
-        code: "INTERNAL_ERROR",
-        message: "Unable to restore file",
+        code:
+          "INTERNAL_ERROR",
+        message:
+          "Unable to restore file",
       },
     });
   }
@@ -1263,217 +1720,429 @@ const restoreFile = async (req, res) => {
    RESTORE FOLDER
 ========================================================= */
 
-const restoreFolder = async (req, res) => {
+const restoreFolder = async (
+  req,
+  res
+) => {
   try {
-    const ownerId = req.user.userId;
-    const { id } = req.params;
+    const ownerId =
+      req.user.userId;
 
-    const folderResult = await pool.query(
-      `SELECT
-         id,
-         name,
-         owner_id,
-         parent_id
-       FROM folders
-       WHERE id = $1
-         AND owner_id = $2
-         AND is_deleted = TRUE`,
-      [id, ownerId]
-    );
+    const { id } =
+      req.params;
 
-    if (folderResult.rows.length === 0) {
+    const folderResult =
+      await pool.query(
+        `SELECT
+           id,
+           name,
+           owner_id,
+           parent_id
+         FROM folders
+         WHERE id = $1
+           AND owner_id = $2
+           AND is_deleted = TRUE`,
+        [
+          id,
+          ownerId,
+        ]
+      );
+
+    if (
+      folderResult.rows.length ===
+      0
+    ) {
       return res.status(404).json({
         error: {
-          code: "FOLDER_NOT_IN_TRASH",
-          message: "Deleted folder not found",
+          code:
+            "FOLDER_NOT_IN_TRASH",
+          message:
+            "Deleted folder not found",
         },
       });
     }
 
-    const folder = folderResult.rows[0];
+    const folder =
+      folderResult.rows[0];
 
-    /*
-     * If the original parent was also deleted,
-     * restore this folder to root instead.
-     */
-    let parentId = folder.parent_id;
+    let parentId =
+      folder.parent_id;
 
     if (parentId) {
-      const parentResult = await pool.query(
-        `SELECT id
-         FROM folders
-         WHERE id = $1
-           AND owner_id = $2
-           AND is_deleted = FALSE`,
-        [parentId, ownerId]
-      );
+      const parentResult =
+        await pool.query(
+          `SELECT id
+           FROM folders
+           WHERE id = $1
+             AND owner_id = $2
+             AND is_deleted = FALSE`,
+          [
+            parentId,
+            ownerId,
+          ]
+        );
 
-      if (parentResult.rows.length === 0) {
+      if (
+        parentResult.rows
+          .length === 0
+      ) {
         parentId = null;
       }
     }
 
-    const result = await pool.query(
-      `UPDATE folders
-       SET is_deleted = FALSE,
-           parent_id = $1,
-           updated_at = NOW()
-       WHERE id = $2
-         AND owner_id = $3
-         AND is_deleted = TRUE
-       RETURNING
-         id,
-         name,
-         owner_id,
-         parent_id,
-         is_deleted,
-         created_at,
-         updated_at`,
-      [parentId, id, ownerId]
-    );
+    const result =
+      await pool.query(
+        `UPDATE folders
+         SET is_deleted = FALSE,
+             parent_id = $1,
+             updated_at = NOW()
+         WHERE id = $2
+           AND owner_id = $3
+           AND is_deleted = TRUE
+         RETURNING
+           id,
+           name,
+           owner_id,
+           parent_id,
+           is_deleted,
+           created_at,
+           updated_at`,
+        [
+          parentId,
+          id,
+          ownerId,
+        ]
+      );
 
-    if (result.rows.length === 0) {
+    if (
+      result.rows.length ===
+      0
+    ) {
       return res.status(404).json({
         error: {
-          code: "FOLDER_NOT_IN_TRASH",
-          message: "Deleted folder not found",
+          code:
+            "FOLDER_NOT_IN_TRASH",
+          message:
+            "Deleted folder not found",
         },
       });
     }
 
     return res.status(200).json({
       success: true,
-      message: "Folder restored successfully",
-      folder: result.rows[0],
+      message:
+        "Folder restored successfully",
+      folder:
+        result.rows[0],
     });
   } catch (error) {
-    console.error("Restore folder error:", error);
+    console.error(
+      "Restore folder error:",
+      error
+    );
 
     return res.status(500).json({
       error: {
-        code: "INTERNAL_ERROR",
-        message: "Unable to restore folder",
+        code:
+          "INTERNAL_ERROR",
+        message:
+          "Unable to restore folder",
       },
     });
   }
 };
-
 
 /* =========================================================
    SEARCH FILES AND FOLDERS
 ========================================================= */
 
-const searchFilesAndFolders = async (req, res) => {
-  try {
-    const ownerId = req.user.userId;
-    const { q = "" } = req.query;
+const searchFilesAndFolders =
+  async (req, res) => {
+    try {
+      const ownerId =
+        req.user.userId;
 
-    const query = q.trim();
+      const queryParams =
+        req.validatedQuery ||
+        req.query ||
+        {};
 
-    if (!query) {
+      const q =
+        queryParams.q || "";
+
+      const {
+        page,
+        limit,
+        offset,
+      } = getPagination(req);
+
+      const query =
+        q.trim();
+
+      if (!query) {
+        return res.status(200).json({
+          success: true,
+          files: [],
+          folders: [],
+          pagination: {
+            page,
+            limit,
+            total: 0,
+            totalPages: 0,
+            hasNextPage: false,
+            hasPreviousPage:
+              page > 1,
+          },
+        });
+      }
+
+      const searchTerm =
+        `%${query}%`;
+
+      const fileCountResult =
+        await pool.query(
+          `SELECT
+             COUNT(*)::int AS total
+           FROM files
+           WHERE owner_id = $1
+             AND is_deleted = FALSE
+             AND name ILIKE $2`,
+          [
+            ownerId,
+            searchTerm,
+          ]
+        );
+
+      const folderCountResult =
+        await pool.query(
+          `SELECT
+             COUNT(*)::int AS total
+           FROM folders
+           WHERE owner_id = $1
+             AND is_deleted = FALSE
+             AND name ILIKE $2`,
+          [
+            ownerId,
+            searchTerm,
+          ]
+        );
+
+      const fileTotal =
+        fileCountResult.rows[0]
+          .total;
+
+      const folderTotal =
+        folderCountResult.rows[0]
+          .total;
+
+      const files =
+        await pool.query(
+          `SELECT
+             id,
+             name,
+             mime_type,
+             size_bytes,
+             owner_id,
+             folder_id,
+             created_at,
+             updated_at
+           FROM files
+           WHERE owner_id = $1
+             AND is_deleted = FALSE
+             AND name ILIKE $2
+           ORDER BY
+             name ASC,
+             id ASC
+           LIMIT $3
+           OFFSET $4`,
+          [
+            ownerId,
+            searchTerm,
+            limit,
+            offset,
+          ]
+        );
+
+      const folders =
+        await pool.query(
+          `SELECT
+             id,
+             name,
+             owner_id,
+             parent_id,
+             is_deleted,
+             created_at,
+             updated_at
+           FROM folders
+           WHERE owner_id = $1
+             AND is_deleted = FALSE
+             AND name ILIKE $2
+           ORDER BY
+             name ASC,
+             id ASC
+           LIMIT $3
+           OFFSET $4`,
+          [
+            ownerId,
+            searchTerm,
+            limit,
+            offset,
+          ]
+        );
+
+      const fileTotalPages =
+        Math.ceil(
+          fileTotal / limit
+        );
+
+      const folderTotalPages =
+        Math.ceil(
+          folderTotal / limit
+        );
+
       return res.status(200).json({
         success: true,
-        files: [],
-        folders: [],
+        query,
+        files:
+          files.rows,
+        folders:
+          folders.rows,
+        pagination: {
+          page,
+          limit,
+          files: {
+            total:
+              fileTotal,
+            totalPages:
+              fileTotalPages,
+            hasNextPage:
+              page <
+              fileTotalPages,
+            hasPreviousPage:
+              page > 1,
+          },
+          folders: {
+            total:
+              folderTotal,
+            totalPages:
+              folderTotalPages,
+            hasNextPage:
+              page <
+              folderTotalPages,
+            hasPreviousPage:
+              page > 1,
+          },
+        },
+      });
+    } catch (error) {
+      console.error(
+        "Search error:",
+        error
+      );
+
+      return res.status(500).json({
+        error: {
+          code:
+            "INTERNAL_ERROR",
+          message:
+            "Unable to search files and folders",
+        },
       });
     }
-
-    const searchTerm = `%${query}%`;
-
-    const files = await pool.query(
-      `SELECT
-         id,
-         name,
-         mime_type,
-         size_bytes,
-         owner_id,
-         folder_id,
-         created_at,
-         updated_at
-       FROM files
-       WHERE owner_id = $1
-         AND is_deleted = FALSE
-         AND name ILIKE $2
-       ORDER BY name ASC`,
-      [ownerId, searchTerm]
-    );
-
-    const folders = await pool.query(
-      `SELECT
-         id,
-         name,
-         owner_id,
-         parent_id,
-         is_deleted,
-         created_at,
-         updated_at
-       FROM folders
-       WHERE owner_id = $1
-         AND is_deleted = FALSE
-         AND name ILIKE $2
-       ORDER BY name ASC`,
-      [ownerId, searchTerm]
-    );
-
-    return res.status(200).json({
-      success: true,
-      query,
-      files: files.rows,
-      folders: folders.rows,
-    });
-  } catch (error) {
-    console.error("Search error:", error);
-
-    return res.status(500).json({
-      error: {
-        code: "INTERNAL_ERROR",
-        message: "Unable to search files and folders",
-      },
-    });
-  }
-};
+  };
 
 /* =========================================================
    GET RECENT FILES
 ========================================================= */
 
-const getRecentFiles = async (req, res) => {
-  try {
-    const ownerId = req.user.userId;
+const getRecentFiles =
+  async (req, res) => {
+    try {
+      const ownerId =
+        req.user.userId;
 
-    const result = await pool.query(
-      `SELECT
-         id,
-         name,
-         mime_type,
-         size_bytes,
-         owner_id,
-         folder_id,
-         created_at,
-         updated_at
-       FROM files
-       WHERE owner_id = $1
-         AND is_deleted = FALSE
-       ORDER BY updated_at DESC
-       LIMIT 20`,
-      [ownerId]
-    );
+      const {
+        page,
+        limit,
+        offset,
+      } = getPagination(req);
 
-    return res.status(200).json({
-      success: true,
-      files: result.rows,
-    });
-  } catch (error) {
-    console.error("Get recent files error:", error);
+      const countResult =
+        await pool.query(
+          `SELECT
+             COUNT(*)::int AS total
+           FROM files
+           WHERE owner_id = $1
+             AND is_deleted = FALSE`,
+          [ownerId]
+        );
 
-    return res.status(500).json({
-      error: {
-        code: "INTERNAL_ERROR",
-        message: "Unable to fetch recent files",
-      },
-    });
-  }
-};
+      const total =
+        countResult.rows[0]
+          .total;
+
+      const totalPages =
+        Math.ceil(
+          total / limit
+        );
+
+      const result =
+        await pool.query(
+          `SELECT
+             id,
+             name,
+             mime_type,
+             size_bytes,
+             owner_id,
+             folder_id,
+             created_at,
+             updated_at
+           FROM files
+           WHERE owner_id = $1
+             AND is_deleted = FALSE
+           ORDER BY
+             updated_at DESC,
+             id DESC
+           LIMIT $2
+           OFFSET $3`,
+          [
+            ownerId,
+            limit,
+            offset,
+          ]
+        );
+
+      return res.status(200).json({
+        success: true,
+        files:
+          result.rows,
+        pagination: {
+          page,
+          limit,
+          total,
+          totalPages,
+          hasNextPage:
+            page < totalPages,
+          hasPreviousPage:
+            page > 1,
+        },
+      });
+    } catch (error) {
+      console.error(
+        "Get recent files error:",
+        error
+      );
+
+      return res.status(500).json({
+        error: {
+          code:
+            "INTERNAL_ERROR",
+          message:
+            "Unable to fetch recent files",
+        },
+      });
+    }
+  };
 
 module.exports = {
   uploadFile,
