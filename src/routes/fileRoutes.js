@@ -1,6 +1,7 @@
 const express = require("express");
 const multer = require("multer");
 const path = require("path");
+const fs = require("fs");
 
 const authMiddleware = require("../middleware/authMiddleware");
 
@@ -41,55 +42,555 @@ const {
 const router = express.Router();
 
 /* =========================================================
+   UPLOAD SECURITY
+========================================================= */
+
+const MAX_FILE_SIZE =
+  50 * 1024 * 1024;
+
+const MAX_FILENAME_LENGTH = 255;
+
+/*
+ * Executable/script extensions are blocked.
+ *
+ * Cloud Drive stores user files and does not need to
+ * execute uploaded files on the server.
+ */
+const blockedExtensions = new Set([
+  ".exe",
+  ".dll",
+  ".com",
+  ".msi",
+  ".scr",
+  ".bat",
+  ".cmd",
+  ".ps1",
+  ".psm1",
+  ".vbs",
+  ".vbe",
+  ".js",
+  ".jse",
+  ".mjs",
+  ".cjs",
+  ".jar",
+  ".sh",
+  ".bash",
+  ".zsh",
+  ".php",
+  ".php3",
+  ".php4",
+  ".php5",
+  ".phtml",
+  ".cgi",
+  ".pl",
+  ".py",
+  ".rb",
+  ".asp",
+  ".aspx",
+  ".jsp",
+  ".war",
+  ".hta",
+]);
+
+/*
+ * MIME types which we explicitly understand.
+ *
+ * application/octet-stream is intentionally allowed for
+ * files whose MIME type cannot be reliably determined by
+ * the client. The extension is still checked separately.
+ */
+const mimeByExtension = {
+  ".jpg": [
+    "image/jpeg",
+  ],
+
+  ".jpeg": [
+    "image/jpeg",
+  ],
+
+  ".png": [
+    "image/png",
+  ],
+
+  ".gif": [
+    "image/gif",
+  ],
+
+  ".webp": [
+    "image/webp",
+  ],
+
+  ".pdf": [
+    "application/pdf",
+  ],
+
+  ".txt": [
+    "text/plain",
+  ],
+
+  ".csv": [
+    "text/csv",
+    "application/csv",
+    "application/vnd.ms-excel",
+  ],
+
+  ".json": [
+    "application/json",
+  ],
+
+  ".doc": [
+    "application/msword",
+  ],
+
+  ".docx": [
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+  ],
+
+  ".xls": [
+    "application/vnd.ms-excel",
+  ],
+
+  ".xlsx": [
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+  ],
+
+  ".ppt": [
+    "application/vnd.ms-powerpoint",
+  ],
+
+  ".pptx": [
+    "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+  ],
+
+  ".zip": [
+    "application/zip",
+  ],
+
+  ".mp3": [
+    "audio/mpeg",
+  ],
+
+  ".wav": [
+    "audio/wav",
+    "audio/x-wav",
+  ],
+
+  ".mp4": [
+    "video/mp4",
+  ],
+
+  ".webm": [
+    "video/webm",
+  ],
+};
+
+/* =========================================================
    MULTER STORAGE
 ========================================================= */
 
-const storage = multer.diskStorage({
-  destination: (req, file, cb) => {
-    cb(
-      null,
-      path.join(
-        __dirname,
-        "../../uploads"
-      )
-    );
-  },
+const storage =
+  multer.diskStorage({
+    destination: (
+      req,
+      file,
+      cb
+    ) => {
+      cb(
+        null,
+        path.join(
+          __dirname,
+          "../../uploads"
+        )
+      );
+    },
 
-  filename: (req, file, cb) => {
+    filename: (
+      req,
+      file,
+      cb
+    ) => {
+      const extension =
+        path.extname(
+          file.originalname || ""
+        ).toLowerCase();
+
+      const uniqueName =
+        `${Date.now()}-${Math.round(
+          Math.random() * 1e9
+        )}${extension}`;
+
+      cb(
+        null,
+        uniqueName
+      );
+    },
+  });
+
+/* =========================================================
+   MULTER FILE FILTER
+========================================================= */
+
+const fileFilter = (
+  req,
+  file,
+  cb
+) => {
+  try {
+    const originalName =
+      file.originalname || "";
+
     const extension =
       path.extname(
-        file.originalname || ""
+        originalName
+      ).toLowerCase();
+
+    /*
+     * Filename must exist.
+     */
+    if (!originalName) {
+      return cb(
+        new Error(
+          "Filename is required"
+        ),
+        false
       );
+    }
 
-    const uniqueName =
-      `${Date.now()}-${Math.round(
-        Math.random() * 1e9
-      )}${extension}`;
+    /*
+     * Reject excessively long filenames.
+     */
+    if (
+      originalName.length >
+      MAX_FILENAME_LENGTH
+    ) {
+      return cb(
+        new Error(
+          "Filename must be 255 characters or less"
+        ),
+        false
+      );
+    }
 
-    cb(null, uniqueName);
-  },
-});
+    /*
+     * Reject null bytes and control characters.
+     */
+    if (
+      /[\u0000-\u001F\u007F]/.test(
+        originalName
+      )
+    ) {
+      return cb(
+        new Error(
+          "Filename contains invalid characters"
+        ),
+        false
+      );
+    }
 
-const upload = multer({
-  storage,
+    /*
+     * Reject path separators.
+     *
+     * The server generates its own storage filename,
+     * but user supplied path characters should still
+     * never be accepted.
+     */
+    if (
+      originalName.includes("/") ||
+      originalName.includes("\\")
+    ) {
+      return cb(
+        new Error(
+          "Filename contains an invalid path"
+        ),
+        false
+      );
+    }
 
-  limits: {
-    fileSize:
-      50 * 1024 * 1024,
+    /*
+     * Reject executable/script extensions.
+     */
+    if (
+      blockedExtensions.has(
+        extension
+      )
+    ) {
+      return cb(
+        new Error(
+          "This file type is not allowed"
+        ),
+        false
+      );
+    }
 
-    files: 1,
+    /*
+     * An extension is required.
+     */
+    if (!extension) {
+      return cb(
+        new Error(
+          "File extension is required"
+        ),
+        false
+      );
+    }
 
-    fields: 10,
+    /*
+     * Validate known MIME/extension pairs.
+     *
+     * Unknown MIME types are allowed when the extension
+     * itself is not dangerous.
+     */
+    const expectedMimeTypes =
+      mimeByExtension[
+        extension
+      ];
 
-    parts: 11,
-  },
-});
+    if (
+      expectedMimeTypes &&
+      file.mimetype &&
+      file.mimetype !==
+        "application/octet-stream" &&
+      !expectedMimeTypes.includes(
+        file.mimetype
+      )
+    ) {
+      return cb(
+        new Error(
+          "File extension and MIME type do not match"
+        ),
+        false
+      );
+    }
+
+    cb(null, true);
+  } catch (error) {
+    cb(error, false);
+  }
+};
+
+/* =========================================================
+   MULTER INSTANCE
+========================================================= */
+
+const upload =
+  multer({
+    storage,
+    fileFilter,
+
+    limits: {
+      fileSize:
+        MAX_FILE_SIZE,
+
+      /*
+       * Only one file should be uploaded by each request.
+       */
+      files: 1,
+
+      /*
+       * Prevent excessive multipart fields.
+       */
+      fields: 10,
+
+      /*
+       * One file + up to 10 fields.
+       */
+      parts: 11,
+    },
+  });
+
+/* =========================================================
+   CLEANUP
+========================================================= */
+
+const cleanupUploadedFiles =
+  async (req) => {
+    const files = [];
+
+    if (req.file) {
+      files.push(req.file);
+    }
+
+    if (
+      Array.isArray(req.files)
+    ) {
+      files.push(
+        ...req.files
+      );
+    }
+
+    for (const file of files) {
+      if (
+        file?.path
+      ) {
+        try {
+          await fs.promises.unlink(
+            file.path
+          );
+        } catch (error) {
+          if (
+            error.code !==
+            "ENOENT"
+          ) {
+            console.error(
+              "Could not clean up rejected upload:",
+              error.message
+            );
+          }
+        }
+      }
+    }
+  };
+
+/* =========================================================
+   UPLOAD MIDDLEWARE
+========================================================= */
+
+const processUpload =
+  (req, res, next) => {
+    upload.any()(
+      req,
+      res,
+      async (error) => {
+        if (error) {
+          await cleanupUploadedFiles(
+            req
+          );
+
+          if (
+            error instanceof
+            multer.MulterError
+          ) {
+            let message =
+              "Upload failed";
+
+            if (
+              error.code ===
+              "LIMIT_FILE_SIZE"
+            ) {
+              message =
+                "File size must be 50 MB or less";
+            } else if (
+              error.code ===
+              "LIMIT_FILE_COUNT"
+            ) {
+              message =
+                "Only one file can be uploaded at a time";
+            } else if (
+              error.code ===
+              "LIMIT_PART_COUNT"
+            ) {
+              message =
+                "Too many multipart fields";
+            }
+
+            return res.status(400).json({
+              error: {
+                code:
+                  "UPLOAD_VALIDATION_ERROR",
+                message,
+              },
+            });
+          }
+
+          return res.status(400).json({
+            error: {
+              code:
+                "UPLOAD_VALIDATION_ERROR",
+              message:
+                error.message ||
+                "Invalid file upload",
+            },
+          });
+        }
+
+        /*
+         * upload.any() stores files in req.files.
+         *
+         * We explicitly enforce exactly zero or one file.
+         */
+        if (
+          Array.isArray(req.files) &&
+          req.files.length > 1
+        ) {
+          await cleanupUploadedFiles(
+            req
+          );
+
+          return res.status(400).json({
+            error: {
+              code:
+                "UPLOAD_VALIDATION_ERROR",
+              message:
+                "Only one file can be uploaded at a time",
+            },
+          });
+        }
+
+        if (
+          Array.isArray(req.files) &&
+          req.files.length === 1
+        ) {
+          req.file =
+            req.files[0];
+        }
+
+        /*
+         * Final validation after Multer.
+         */
+        if (req.file) {
+          const originalName =
+            req.file.originalname ||
+            "";
+
+          if (
+            originalName.length >
+            MAX_FILENAME_LENGTH
+          ) {
+            await cleanupUploadedFiles(
+              req
+            );
+
+            return res.status(400).json({
+              error: {
+                code:
+                  "UPLOAD_VALIDATION_ERROR",
+                message:
+                  "Filename must be 255 characters or less",
+              },
+            });
+          }
+
+          if (
+            req.file.size >
+            MAX_FILE_SIZE
+          ) {
+            await cleanupUploadedFiles(
+              req
+            );
+
+            return res.status(400).json({
+              error: {
+                code:
+                  "UPLOAD_VALIDATION_ERROR",
+                message:
+                  "File size must be 50 MB or less",
+              },
+            });
+          }
+        }
+
+        next();
+      }
+    );
+  };
 
 /* =========================================================
    AUTH
 ========================================================= */
 
-router.use(authMiddleware);
+router.use(
+  authMiddleware
+);
 
 /* =========================================================
    UPLOAD
@@ -97,17 +598,17 @@ router.use(authMiddleware);
 
 router.post(
   "/upload",
-  upload.single("file"),
+  processUpload,
   validate({
-    body: uploadFileBodySchema,
+    body:
+      uploadFileBodySchema,
   }),
   (req, res) => {
-    if (
-      !req.file
-    ) {
+    if (!req.file) {
       return res.status(400).json({
         error: {
-          code: "FILE_REQUIRED",
+          code:
+            "FILE_REQUIRED",
           message:
             "Please select a file to upload",
         },
@@ -127,18 +628,21 @@ router.post(
 
 router.post(
   "/:id/versions",
-  upload.single("file"),
   validate({
-    params: fileIdParamsSchema,
-    body: uploadFileBodySchema,
+    params:
+      fileIdParamsSchema,
+  }),
+  processUpload,
+  validate({
+    body:
+      uploadFileBodySchema,
   }),
   (req, res) => {
-    if (
-      !req.file
-    ) {
+    if (!req.file) {
       return res.status(400).json({
         error: {
-          code: "FILE_REQUIRED",
+          code:
+            "FILE_REQUIRED",
           message:
             "Please select a file to upload",
         },
@@ -155,7 +659,8 @@ router.post(
 router.get(
   "/:id/versions",
   validate({
-    params: fileIdParamsSchema,
+    params:
+      fileIdParamsSchema,
   }),
   getFileVersions
 );
@@ -179,7 +684,7 @@ router.post(
 );
 
 /* =========================================================
-   RECENT FILES
+   STATIC ROUTES
 ========================================================= */
 
 router.get(
@@ -187,84 +692,73 @@ router.get(
   getRecentFiles
 );
 
-/* =========================================================
-   STORAGE STATS
-
-   Keep before /:id routes.
-========================================================= */
-
 router.get(
   "/stats",
   getStorageStats
 );
 
-/* =========================================================
-   SEARCH
-
-   Keep before /:id routes.
-========================================================= */
-
 router.get(
   "/search",
   validate({
-    query: searchQuerySchema,
+    query:
+      searchQuerySchema,
   }),
   searchFilesAndFolders
 );
-
-/* =========================================================
-   GET FILES
-========================================================= */
-
-router.get(
-  "/",
-  validate({
-    query: getFilesQuerySchema,
-  }),
-  getFiles
-);
-
-/* =========================================================
-   RENAME FILE
-========================================================= */
-
-router.patch(
-  "/:id",
-  validate({
-    params: fileIdParamsSchema,
-    body: renameFileSchema,
-  }),
-  requireEditorAccess("file"),
-  renameFile
-);
-
-/* =========================================================
-   MOVE FILE
-========================================================= */
-
-router.patch(
-  "/:id/move",
-  validate({
-    params: fileIdParamsSchema,
-    body: moveFileSchema,
-  }),
-  requireEditorAccess("file"),
-  moveFile
-);
-
-/* =========================================================
-   TRASH
-========================================================= */
 
 router.get(
   "/trash",
   getTrash
 );
 
+router.get(
+  "/",
+  validate({
+    query:
+      getFilesQuerySchema,
+  }),
+  getFiles
+);
+
+/* =========================================================
+   FILE OPERATIONS
+========================================================= */
+
+router.patch(
+  "/:id",
+  validate({
+    params:
+      fileIdParamsSchema,
+
+    body:
+      renameFileSchema,
+  }),
+  requireEditorAccess(
+    "file"
+  ),
+  renameFile
+);
+
+router.patch(
+  "/:id/move",
+  validate({
+    params:
+      fileIdParamsSchema,
+
+    body:
+      moveFileSchema,
+  }),
+  requireEditorAccess(
+    "file"
+  ),
+  moveFile
+);
+
 router.patch(
   "/trash/:id/restore",
   validate({
-    params: fileIdParamsSchema,
+    params:
+      fileIdParamsSchema,
   }),
   restoreFile
 );
@@ -272,31 +766,26 @@ router.patch(
 router.patch(
   "/trash/folder/:id/restore",
   validate({
-    params: fileIdParamsSchema,
+    params:
+      fileIdParamsSchema,
   }),
   restoreFolder
 );
 
-/* =========================================================
-   DOWNLOAD FILE
-========================================================= */
-
 router.get(
   "/:id/download",
   validate({
-    params: fileIdParamsSchema,
+    params:
+      fileIdParamsSchema,
   }),
   downloadFile
 );
 
-/* =========================================================
-   DELETE FILE
-========================================================= */
-
 router.delete(
   "/:id",
   validate({
-    params: fileIdParamsSchema,
+    params:
+      fileIdParamsSchema,
   }),
   deleteFile
 );
