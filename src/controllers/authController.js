@@ -67,11 +67,11 @@ const register = async (req, res) => {
     const token = generateToken(user);
 
     res.cookie("token", token, {
-      httpOnly: true,
-      sameSite: "lax",
-      secure: process.env.NODE_ENV === "production",
-      maxAge: 24 * 60 * 60 * 1000,
-    });
+  httpOnly: true,
+  sameSite: "none",
+  secure: true,
+  maxAge: 24 * 60 * 60 * 1000,
+});
 
     return res.status(201).json({
       success: true,
@@ -140,12 +140,12 @@ const login = async (req, res) => {
 
     const token = generateToken(user);
 
-    res.cookie("token", token, {
-      httpOnly: true,
-      sameSite: "lax",
-      secure: process.env.NODE_ENV === "production",
-      maxAge: 24 * 60 * 60 * 1000,
-    });
+   res.cookie("token", token, {
+  httpOnly: true,
+  sameSite: "none",
+  secure: true,
+  maxAge: 24 * 60 * 60 * 1000,
+});
 
     return res.status(200).json({
       success: true,
@@ -199,10 +199,10 @@ const getMe = async (req, res) => {
 
 const logout = async (req, res) => {
   res.clearCookie("token", {
-    httpOnly: true,
-    sameSite: "lax",
-    secure: process.env.NODE_ENV === "production",
-  });
+  httpOnly: true,
+  sameSite: "none",
+  secure: true,
+});
 
   return res.status(200).json({
     success: true,

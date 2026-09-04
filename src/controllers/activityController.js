@@ -1,6 +1,34 @@
 const { pool } = require("../config/database");
 
 /* =========================================================
+   PAGINATION HELPER
+========================================================= */
+
+const getPagination = (req) => {
+  const rawPage = req.query.page;
+  const rawLimit = req.query.limit;
+
+  const page = Math.max(
+    1,
+    Number.parseInt(rawPage || "1", 10) || 1
+  );
+
+  const limit = Math.min(
+    100,
+    Math.max(
+      1,
+      Number.parseInt(rawLimit || "20", 10) || 20
+    )
+  );
+
+  return {
+    page,
+    limit,
+    offset: (page - 1) * limit,
+  };
+};
+
+/* =========================================================
    LOG ACTIVITY
 ========================================================= */
 
@@ -42,6 +70,16 @@ const logActivity = async ({
 const getActivities = async (req, res) => {
   try {
     const userId = req.user.userId;
+    const { page, limit, offset } = getPagination(req);
+
+    const countResult = await pool.query(
+      `SELECT COUNT(*)::int AS total
+       FROM activities
+       WHERE actor_id = $1`,
+      [userId]
+    );
+
+    const total = countResult.rows[0].total;
 
     const result = await pool.query(
       `SELECT
@@ -58,20 +96,26 @@ const getActivities = async (req, res) => {
        LEFT JOIN users u
          ON u.id = a.actor_id
        WHERE a.actor_id = $1
-       ORDER BY a.created_at DESC
-       LIMIT 100`,
-      [userId]
+       ORDER BY a.created_at DESC, a.id DESC
+       LIMIT $2
+       OFFSET $3`,
+      [userId, limit, offset]
     );
 
     return res.status(200).json({
       success: true,
       activities: result.rows,
+      pagination: {
+        page,
+        limit,
+        total,
+        totalPages: Math.ceil(total / limit),
+        hasNextPage: page < Math.ceil(total / limit),
+        hasPreviousPage: page > 1,
+      },
     });
   } catch (error) {
-    console.error(
-      "Get activities error:",
-      error
-    );
+    console.error("Get activities error:", error);
 
     return res.status(500).json({
       error: {

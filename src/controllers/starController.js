@@ -1,6 +1,32 @@
-// backend/src/controllers/starController.js
-
 const { pool } = require("../config/database");
+
+/* =========================================================
+   PAGINATION HELPER
+========================================================= */
+
+const getPagination = (req) => {
+  const rawPage = req.query.page;
+  const rawLimit = req.query.limit;
+
+  const page = Math.max(
+    1,
+    Number.parseInt(rawPage || "1", 10) || 1
+  );
+
+  const limit = Math.min(
+    100,
+    Math.max(
+      1,
+      Number.parseInt(rawLimit || "20", 10) || 20
+    )
+  );
+
+  return {
+    page,
+    limit,
+    offset: (page - 1) * limit,
+  };
+};
 
 /* =========================================================
    STAR RESOURCE
@@ -154,6 +180,37 @@ const unstarResource = async (req, res) => {
 const getStarredResources = async (req, res) => {
   try {
     const userId = req.user.userId;
+    const { page, limit, offset } = getPagination(req);
+
+    const countResult = await pool.query(
+      `SELECT COUNT(*)::int AS total
+       FROM stars s
+       LEFT JOIN files f
+         ON s.resource_type = 'file'
+        AND f.id = s.resource_id
+        AND f.owner_id = s.user_id
+        AND f.is_deleted = FALSE
+       LEFT JOIN folders fo
+         ON s.resource_type = 'folder'
+        AND fo.id = s.resource_id
+        AND fo.owner_id = s.user_id
+        AND fo.is_deleted = FALSE
+       WHERE s.user_id = $1
+         AND (
+           (
+             s.resource_type = 'file'
+             AND f.id IS NOT NULL
+           )
+           OR
+           (
+             s.resource_type = 'folder'
+             AND fo.id IS NOT NULL
+           )
+         )`,
+      [userId]
+    );
+
+    const total = countResult.rows[0].total;
 
     const result = await pool.query(
       `SELECT
@@ -215,19 +272,26 @@ const getStarredResources = async (req, res) => {
          )
        )
 
-       ORDER BY name ASC`,
-      [userId]
+       ORDER BY name ASC, s.resource_id ASC
+       LIMIT $2
+       OFFSET $3`,
+      [userId, limit, offset]
     );
 
     return res.status(200).json({
       success: true,
       starred: result.rows,
+      pagination: {
+        page,
+        limit,
+        total,
+        totalPages: Math.ceil(total / limit),
+        hasNextPage: page < Math.ceil(total / limit),
+        hasPreviousPage: page > 1,
+      },
     });
   } catch (error) {
-    console.error(
-      "Get starred resources error:",
-      error
-    );
+    console.error("Get starred resources error:", error);
 
     return res.status(500).json({
       error: {

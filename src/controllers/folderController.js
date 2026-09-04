@@ -4,6 +4,34 @@ const {
 } = require("../middleware/sharePermission");
 
 /* =========================================================
+   PAGINATION HELPER
+========================================================= */
+
+const getPagination = (req) => {
+  const rawPage = req.query.page;
+  const rawLimit = req.query.limit;
+
+  const page = Math.max(
+    1,
+    Number.parseInt(rawPage || "1", 10) || 1
+  );
+
+  const limit = Math.min(
+    100,
+    Math.max(
+      1,
+      Number.parseInt(rawLimit || "20", 10) || 20
+    )
+  );
+
+  return {
+    page,
+    limit,
+    offset: (page - 1) * limit,
+  };
+};
+
+/* =========================================================
    CREATE FOLDER
 ========================================================= */
 
@@ -79,6 +107,21 @@ const getFolders = async (req, res) => {
   try {
     const ownerId = req.user.userId;
     const { parentId } = req.query;
+    const { page, limit, offset } = getPagination(req);
+
+    const countResult = await pool.query(
+      `SELECT COUNT(*)::int AS total
+       FROM folders
+       WHERE owner_id = $1
+         AND is_deleted = FALSE
+         AND (
+           ($2::uuid IS NULL AND parent_id IS NULL)
+           OR parent_id = $2::uuid
+         )`,
+      [ownerId, parentId || null]
+    );
+
+    const total = countResult.rows[0].total;
 
     const result = await pool.query(
       `SELECT
@@ -96,13 +139,28 @@ const getFolders = async (req, res) => {
            ($2::uuid IS NULL AND parent_id IS NULL)
            OR parent_id = $2::uuid
          )
-       ORDER BY name ASC`,
-      [ownerId, parentId || null]
+       ORDER BY name ASC, id ASC
+       LIMIT $3
+       OFFSET $4`,
+      [
+        ownerId,
+        parentId || null,
+        limit,
+        offset,
+      ]
     );
 
     return res.status(200).json({
       success: true,
       folders: result.rows,
+      pagination: {
+        page,
+        limit,
+        total,
+        totalPages: Math.ceil(total / limit),
+        hasNextPage: page < Math.ceil(total / limit),
+        hasPreviousPage: page > 1,
+      },
     });
   } catch (error) {
     console.error("Get folders error:", error);
@@ -189,9 +247,6 @@ const moveFolder = async (req, res) => {
     const { id } = req.params;
     const { parentId = null } = req.body;
 
-    /*
-     * Check whether current user owns/edits the folder.
-     */
     const permission = await getResourcePermission(
       userId,
       "folder",
@@ -207,9 +262,6 @@ const moveFolder = async (req, res) => {
       });
     }
 
-    /*
-     * Viewer cannot move folders.
-     */
     if (
       permission.role !== "owner" &&
       permission.role !== "editor"
@@ -223,9 +275,6 @@ const moveFolder = async (req, res) => {
       });
     }
 
-    /*
-     * Get the folder.
-     */
     const folderResult = await pool.query(
       `SELECT
          id,
@@ -249,15 +298,9 @@ const moveFolder = async (req, res) => {
 
     const folder = folderResult.rows[0];
 
-    /*
-     * null / empty string = move to root.
-     */
     const destinationParent =
       parentId === "" ? null : parentId;
 
-    /*
-     * Already in this location.
-     */
     if (
       (folder.parent_id === null &&
         destinationParent === null) ||
@@ -272,9 +315,6 @@ const moveFolder = async (req, res) => {
       });
     }
 
-    /*
-     * Moving to root.
-     */
     if (destinationParent === null) {
       const result = await pool.query(
         `UPDATE folders
@@ -300,9 +340,6 @@ const moveFolder = async (req, res) => {
       });
     }
 
-    /*
-     * Destination must belong to the same owner.
-     */
     const destinationResult = await pool.query(
       `SELECT
          id,
@@ -326,18 +363,6 @@ const moveFolder = async (req, res) => {
       });
     }
 
-    /*
-     * Prevent moving a folder into itself
-     * or any of its descendants.
-     *
-     * Example:
-     *
-     * A
-     * └── B
-     *     └── C
-     *
-     * A → C = forbidden
-     */
     const cycleCheck = await pool.query(
       `WITH RECURSIVE descendants AS (
          SELECT id
@@ -375,9 +400,6 @@ const moveFolder = async (req, res) => {
       });
     }
 
-    /*
-     * Move folder.
-     */
     const result = await pool.query(
       `UPDATE folders
        SET parent_id = $1,
