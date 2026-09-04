@@ -1,5 +1,7 @@
 const fs = require("fs");
 const path = require("path");
+const crypto = require("crypto");
+const bcrypt = require("bcryptjs");
 
 const { pool } = require("../config/database");
 
@@ -129,10 +131,7 @@ const createShare = async (req, res) => {
                    grantee_user_id,
                    role,
                    created_at`,
-        [
-          role,
-          existingShare.rows[0].id,
-        ]
+        [role, existingShare.rows[0].id]
       );
 
       return res.status(200).json({
@@ -142,8 +141,7 @@ const createShare = async (req, res) => {
           ...updated.rows[0],
           email: grantee.email,
           name: grantee.name,
-          resource_name:
-            resource.rows[0].name,
+          resource_name: resource.rows[0].name,
         },
       });
     }
@@ -181,15 +179,11 @@ const createShare = async (req, res) => {
         ...result.rows[0],
         email: grantee.email,
         name: grantee.name,
-        resource_name:
-          resource.rows[0].name,
+        resource_name: resource.rows[0].name,
       },
     });
   } catch (error) {
-    console.error(
-      "Create share error:",
-      error
-    );
+    console.error("Create share error:", error);
 
     return res.status(500).json({
       error: {
@@ -282,10 +276,7 @@ const getResourceShares = async (req, res) => {
       shares: result.rows,
     });
   } catch (error) {
-    console.error(
-      "Get shares error:",
-      error
-    );
+    console.error("Get shares error:", error);
 
     return res.status(500).json({
       error: {
@@ -508,7 +499,6 @@ const getSharedFolderContents = async (
 
 /* =========================================================
    DOWNLOAD SHARED FILE
-   Viewer + Editor
 ========================================================= */
 
 const downloadSharedFile = async (
@@ -600,17 +590,6 @@ const downloadSharedFile = async (
 
 /* =========================================================
    CHECK SHARED RESOURCE PERMISSION
-
-   Returns:
-   {
-     hasAccess: true/false,
-     role: viewer/editor,
-     resourceType: file/folder
-   }
-
-   Editor permission is accepted when:
-   1. User has a direct editor share on the file/folder
-   2. User has an editor share on the parent folder
 ========================================================= */
 
 const getSharedPermission = async (
@@ -655,10 +634,6 @@ const getSharedPermission = async (
       };
     }
 
-    /*
-     * Check whether the file is inside
-     * a folder shared with this user.
-     */
     const folderShare =
       await pool.query(
         `SELECT
@@ -721,8 +696,6 @@ const getSharedPermission = async (
 
 /* =========================================================
    PERMISSION CHECK ENDPOINT
-
-   Useful for frontend and future editor operations.
 ========================================================= */
 
 const checkPermission = async (
@@ -796,7 +769,7 @@ const checkPermission = async (
 };
 
 /* =========================================================
-   REMOVE FROM "SHARED WITH ME"
+   REMOVE FROM SHARED WITH ME
 ========================================================= */
 
 const removeSharedWithMe = async (
@@ -920,6 +893,443 @@ const deleteShare = async (
 };
 
 /* =========================================================
+   CREATE PUBLIC LINK
+========================================================= */
+
+const createPublicLink = async (req, res) => {
+  try {
+    const userId = req.user.userId;
+
+    const {
+      resourceType,
+      resourceId,
+      role = "viewer",
+      password,
+      expiresAt,
+    } = req.body;
+
+    if (!resourceType || !resourceId) {
+      return res.status(400).json({
+        error: {
+          code: "VALIDATION_ERROR",
+          message:
+            "Resource type and resource ID are required",
+        },
+      });
+    }
+
+    if (resourceType !== "file") {
+      return res.status(400).json({
+        error: {
+          code: "INVALID_RESOURCE_TYPE",
+          message:
+            "Public links currently support files only",
+        },
+      });
+    }
+
+    if (!["viewer", "editor"].includes(role)) {
+      return res.status(400).json({
+        error: {
+          code: "INVALID_ROLE",
+          message:
+            "Role must be viewer or editor",
+        },
+      });
+    }
+
+    const resourceResult = await pool.query(
+      `SELECT
+         id,
+         name,
+         storage_key,
+         mime_type,
+         is_deleted
+       FROM files
+       WHERE id = $1
+         AND owner_id = $2`,
+      [resourceId, userId]
+    );
+
+    if (
+      resourceResult.rows.length === 0 ||
+      resourceResult.rows[0].is_deleted
+    ) {
+      return res.status(404).json({
+        error: {
+          code: "RESOURCE_NOT_FOUND",
+          message: "File not found",
+        },
+      });
+    }
+
+    if (
+      expiresAt &&
+      new Date(expiresAt).getTime() <= Date.now()
+    ) {
+      return res.status(400).json({
+        error: {
+          code: "INVALID_EXPIRATION",
+          message:
+            "Expiration time must be in the future",
+        },
+      });
+    }
+
+    let passwordHash = null;
+
+    if (password) {
+      passwordHash = await bcrypt.hash(
+        password,
+        10
+      );
+    }
+
+    const token = crypto
+      .randomBytes(32)
+      .toString("hex");
+
+    const result = await pool.query(
+      `INSERT INTO link_shares
+       (
+         resource_type,
+         resource_id,
+         token,
+         role,
+         password_hash,
+         expires_at,
+         created_by
+       )
+       VALUES ($1, $2, $3, $4, $5, $6, $7)
+       RETURNING
+         id,
+         resource_type,
+         resource_id,
+         token,
+         role,
+         expires_at,
+         created_at`,
+      [
+        resourceType,
+        resourceId,
+        token,
+        role,
+        passwordHash,
+        expiresAt || null,
+        userId,
+      ]
+    );
+
+    return res.status(201).json({
+      success: true,
+      message:
+        "Public link created successfully",
+      link: {
+        ...result.rows[0],
+        url: `/api/shares/public/${token}`,
+        passwordProtected: !!passwordHash,
+      },
+    });
+  } catch (error) {
+    console.error(
+      "Create public link error:",
+      error
+    );
+
+    return res.status(500).json({
+      error: {
+        code: "INTERNAL_ERROR",
+        message:
+          "Unable to create public link",
+      },
+    });
+  }
+};
+
+/* =========================================================
+   GET PUBLIC LINKS FOR RESOURCE
+========================================================= */
+
+const getPublicLinks = async (req, res) => {
+  try {
+    const userId = req.user.userId;
+    const {
+      resourceType,
+      resourceId,
+    } = req.query;
+
+    if (!resourceType || !resourceId) {
+      return res.status(400).json({
+        error: {
+          code: "VALIDATION_ERROR",
+          message:
+            "Resource type and resource ID are required",
+        },
+      });
+    }
+
+    const resourceResult = await pool.query(
+      resourceType === "file"
+        ? `SELECT id
+           FROM files
+           WHERE id = $1
+             AND owner_id = $2
+             AND is_deleted = FALSE`
+        : `SELECT id
+           FROM folders
+           WHERE id = $1
+             AND owner_id = $2
+             AND is_deleted = FALSE`,
+      [resourceId, userId]
+    );
+
+    if (resourceResult.rows.length === 0) {
+      return res.status(404).json({
+        error: {
+          code: "RESOURCE_NOT_FOUND",
+          message:
+            "Resource not found",
+        },
+      });
+    }
+
+    const result = await pool.query(
+      `SELECT
+         id,
+         resource_type,
+         resource_id,
+         token,
+         role,
+         password_hash IS NOT NULL AS password_protected,
+         expires_at,
+         created_at
+       FROM link_shares
+       WHERE resource_type = $1
+         AND resource_id = $2
+       ORDER BY created_at DESC`,
+      [resourceType, resourceId]
+    );
+
+    return res.status(200).json({
+      success: true,
+      links: result.rows.map((link) => ({
+        ...link,
+        url: `/api/shares/public/${link.token}`,
+      })),
+    });
+  } catch (error) {
+    console.error(
+      "Get public links error:",
+      error
+    );
+
+    return res.status(500).json({
+      error: {
+        code: "INTERNAL_ERROR",
+        message:
+          "Unable to fetch public links",
+      },
+    });
+  }
+};
+
+/* =========================================================
+   ACCESS PUBLIC LINK
+========================================================= */
+
+const accessPublicLink = async (req, res) => {
+  try {
+    const { token } = req.params;
+    const { password } = req.query;
+
+    if (!token) {
+      return res.status(400).json({
+        error: {
+          code: "INVALID_TOKEN",
+          message:
+            "Public link token is required",
+        },
+      });
+    }
+
+    const result = await pool.query(
+      `SELECT
+         l.id,
+         l.resource_type,
+         l.resource_id,
+         l.role,
+         l.password_hash,
+         l.expires_at,
+
+         f.name,
+         f.storage_key,
+         f.mime_type,
+         f.is_deleted
+
+       FROM link_shares l
+
+       LEFT JOIN files f
+         ON l.resource_type = 'file'
+        AND f.id = l.resource_id
+
+       WHERE l.token = $1`,
+      [token]
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({
+        error: {
+          code: "PUBLIC_LINK_NOT_FOUND",
+          message:
+            "Public link not found",
+        },
+      });
+    }
+
+    const link = result.rows[0];
+
+    if (
+      link.expires_at &&
+      new Date(link.expires_at).getTime() <= Date.now()
+    ) {
+      return res.status(410).json({
+        error: {
+          code: "PUBLIC_LINK_EXPIRED",
+          message:
+            "Public link has expired",
+        },
+      });
+    }
+
+    if (
+      link.resource_type !== "file" ||
+      !link.name ||
+      link.is_deleted
+    ) {
+      return res.status(404).json({
+        error: {
+          code: "RESOURCE_NOT_FOUND",
+          message:
+            "Shared resource not found",
+        },
+      });
+    }
+
+    if (link.password_hash) {
+      if (!password) {
+        return res.status(401).json({
+          error: {
+            code: "PASSWORD_REQUIRED",
+            message:
+              "Password is required",
+          },
+        });
+      }
+
+      const validPassword =
+        await bcrypt.compare(
+          password,
+          link.password_hash
+        );
+
+      if (!validPassword) {
+        return res.status(401).json({
+          error: {
+            code: "INVALID_PASSWORD",
+            message:
+              "Invalid public link password",
+          },
+        });
+      }
+    }
+
+    const filePath = path.join(
+      uploadsDir,
+      link.storage_key
+    );
+
+    if (!fs.existsSync(filePath)) {
+      return res.status(404).json({
+        error: {
+          code: "STORAGE_FILE_NOT_FOUND",
+          message:
+            "Stored file not found",
+        },
+      });
+    }
+
+    return res.download(
+      filePath,
+      link.name
+    );
+  } catch (error) {
+    console.error(
+      "Access public link error:",
+      error
+    );
+
+    return res.status(500).json({
+      error: {
+        code: "INTERNAL_ERROR",
+        message:
+          "Unable to access public link",
+      },
+    });
+  }
+};
+
+/* =========================================================
+   DELETE PUBLIC LINK
+========================================================= */
+
+const deletePublicLink = async (req, res) => {
+  try {
+    const userId = req.user.userId;
+    const { id } = req.params;
+
+    const result = await pool.query(
+      `DELETE FROM link_shares l
+       USING files f
+       WHERE l.id = $1
+         AND l.resource_type = 'file'
+         AND f.id = l.resource_id
+         AND f.owner_id = $2
+       RETURNING l.id`,
+      [id, userId]
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({
+        error: {
+          code: "PUBLIC_LINK_NOT_FOUND",
+          message:
+            "Public link not found",
+        },
+      });
+    }
+
+    return res.status(200).json({
+      success: true,
+      message:
+        "Public link revoked successfully",
+    });
+  } catch (error) {
+    console.error(
+      "Delete public link error:",
+      error
+    );
+
+    return res.status(500).json({
+      error: {
+        code: "INTERNAL_ERROR",
+        message:
+          "Unable to revoke public link",
+      },
+    });
+  }
+};
+
+/* =========================================================
    EXPORTS
 ========================================================= */
 
@@ -933,4 +1343,9 @@ module.exports = {
   checkPermission,
   removeSharedWithMe,
   deleteShare,
+
+  createPublicLink,
+  getPublicLinks,
+  accessPublicLink,
+  deletePublicLink,
 };

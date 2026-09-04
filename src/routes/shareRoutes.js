@@ -12,10 +12,29 @@ const {
   checkPermission,
   removeSharedWithMe,
   deleteShare,
+  createPublicLink,
+  getPublicLinks,
+  accessPublicLink,
+  deletePublicLink,
 } = require("../controllers/shareController");
 
 const router = express.Router();
 
+/*
+ * PUBLIC LINK ACCESS
+ *
+ * IMPORTANT:
+ * This route must be BEFORE authMiddleware.
+ * Anyone with the token can access it.
+ */
+router.get(
+  "/public/:token",
+  accessPublicLink
+);
+
+/*
+ * All routes below require authentication.
+ */
 router.use(authMiddleware);
 
 /*
@@ -25,11 +44,35 @@ router.post("/", createShare);
 
 /*
  * Permission check
- *
- * IMPORTANT:
- * Keep this BEFORE /:id routes.
  */
-router.get("/permission", checkPermission);
+router.get(
+  "/permission",
+  checkPermission
+);
+
+/*
+ * Create public link
+ */
+router.post(
+  "/public",
+  createPublicLink
+);
+
+/*
+ * Get public links for a resource
+ */
+router.get(
+  "/public",
+  getPublicLinks
+);
+
+/*
+ * Delete public link
+ */
+router.delete(
+  "/public/:id",
+  deletePublicLink
+);
 
 /*
  * Shared with me
