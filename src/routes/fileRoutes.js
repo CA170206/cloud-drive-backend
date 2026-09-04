@@ -20,6 +20,7 @@ const {
   getFileVersions,
   downloadFileVersion,
   restoreFileVersion,
+  getRecentFiles,
 } = require("../controllers/fileController");
 
 const {
@@ -131,6 +132,11 @@ router.get(
 router.post(
   "/:id/versions/:versionId/restore",
   restoreFileVersion
+);
+
+router.get(
+  "/recent",
+  getRecentFiles
 );
 
 /* =========================================================

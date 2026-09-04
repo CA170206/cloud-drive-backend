@@ -1433,6 +1433,48 @@ const searchFilesAndFolders = async (req, res) => {
   }
 };
 
+/* =========================================================
+   GET RECENT FILES
+========================================================= */
+
+const getRecentFiles = async (req, res) => {
+  try {
+    const ownerId = req.user.userId;
+
+    const result = await pool.query(
+      `SELECT
+         id,
+         name,
+         mime_type,
+         size_bytes,
+         owner_id,
+         folder_id,
+         created_at,
+         updated_at
+       FROM files
+       WHERE owner_id = $1
+         AND is_deleted = FALSE
+       ORDER BY updated_at DESC
+       LIMIT 20`,
+      [ownerId]
+    );
+
+    return res.status(200).json({
+      success: true,
+      files: result.rows,
+    });
+  } catch (error) {
+    console.error("Get recent files error:", error);
+
+    return res.status(500).json({
+      error: {
+        code: "INTERNAL_ERROR",
+        message: "Unable to fetch recent files",
+      },
+    });
+  }
+};
+
 module.exports = {
   uploadFile,
   getFiles,
@@ -1449,4 +1491,5 @@ module.exports = {
   getFileVersions,
   downloadFileVersion,
   restoreFileVersion,
+  getRecentFiles,
 };
