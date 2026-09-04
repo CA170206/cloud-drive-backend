@@ -29,16 +29,19 @@ const {
   publicLinkPasswordQuerySchema,
 } = require("../middleware/validate");
 
+const {
+  publicLinkLimiter,
+} = require("../middleware/rateLimiter");
+
 const router = express.Router();
 
 /* =========================================================
    PUBLIC LINK ACCESS
-
-   Must remain BEFORE authMiddleware.
 ========================================================= */
 
 router.get(
   "/public/:token",
+  publicLinkLimiter,
   validate({
     params:
       publicLinkTokenParamsSchema,

@@ -15,6 +15,10 @@ const {
   loginSchema,
 } = require("../middleware/validate");
 
+const {
+  authLimiter,
+} = require("../middleware/rateLimiter");
+
 const router = express.Router();
 
 /* =========================================================
@@ -23,6 +27,7 @@ const router = express.Router();
 
 router.post(
   "/register",
+  authLimiter,
   validate({
     body: registerSchema,
   }),
@@ -35,6 +40,7 @@ router.post(
 
 router.post(
   "/login",
+  authLimiter,
   validate({
     body: loginSchema,
   }),
