@@ -8,7 +8,6 @@ const {
   getSharedWithMe,
   getSharedFolderContents,
   downloadSharedFile,
-  getSharedPermission,
   checkPermission,
   removeSharedWithMe,
   deleteShare,
@@ -18,107 +17,174 @@ const {
   deletePublicLink,
 } = require("../controllers/shareController");
 
+const {
+  validate,
+  createShareSchema,
+  resourceQuerySchema,
+  sharedFolderParamsSchema,
+  sharedFileParamsSchema,
+  shareIdParamsSchema,
+  publicLinkTokenParamsSchema,
+  createPublicLinkSchema,
+  publicLinkPasswordQuerySchema,
+} = require("../middleware/validate");
+
 const router = express.Router();
 
-/*
- * PUBLIC LINK ACCESS
- *
- * IMPORTANT:
- * This route must be BEFORE authMiddleware.
- * Anyone with the token can access it.
- */
+/* =========================================================
+   PUBLIC LINK ACCESS
+
+   Must remain BEFORE authMiddleware.
+========================================================= */
+
 router.get(
   "/public/:token",
+  validate({
+    params:
+      publicLinkTokenParamsSchema,
+
+    query:
+      publicLinkPasswordQuerySchema,
+  }),
   accessPublicLink
 );
 
-/*
- * All routes below require authentication.
- */
+/* =========================================================
+   AUTHENTICATED ROUTES
+========================================================= */
+
 router.use(authMiddleware);
 
-/*
- * Create a share / update an existing share
- */
-router.post("/", createShare);
+/* =========================================================
+   CREATE / UPDATE SHARE
+========================================================= */
 
-/*
- * Permission check
- */
+router.post(
+  "/",
+  validate({
+    body: createShareSchema,
+  }),
+  createShare
+);
+
+/* =========================================================
+   PERMISSION CHECK
+========================================================= */
+
 router.get(
   "/permission",
+  validate({
+    query: resourceQuerySchema,
+  }),
   checkPermission
 );
 
-/*
- * Create public link
- */
+/* =========================================================
+   CREATE PUBLIC LINK
+========================================================= */
+
 router.post(
   "/public",
+  validate({
+    body: createPublicLinkSchema,
+  }),
   createPublicLink
 );
 
-/*
- * Get public links for a resource
- */
+/* =========================================================
+   GET PUBLIC LINKS
+========================================================= */
+
 router.get(
   "/public",
+  validate({
+    query: resourceQuerySchema,
+  }),
   getPublicLinks
 );
 
-/*
- * Delete public link
- */
+/* =========================================================
+   DELETE PUBLIC LINK
+========================================================= */
+
 router.delete(
   "/public/:id",
+  validate({
+    params: shareIdParamsSchema,
+  }),
   deletePublicLink
 );
 
-/*
- * Shared with me
- */
+/* =========================================================
+   SHARED WITH ME
+========================================================= */
+
 router.get(
   "/shared-with-me",
   getSharedWithMe
 );
 
-/*
- * Shared folder contents
- */
+/* =========================================================
+   SHARED FOLDER CONTENTS
+========================================================= */
+
 router.get(
   "/shared-with-me/folder/:id",
+  validate({
+    params:
+      sharedFolderParamsSchema,
+  }),
   getSharedFolderContents
 );
 
-/*
- * Download shared file
- */
+/* =========================================================
+   DOWNLOAD SHARED FILE
+========================================================= */
+
 router.get(
   "/shared-with-me/:id/download",
+  validate({
+    params:
+      sharedFileParamsSchema,
+  }),
   downloadSharedFile
 );
 
-/*
- * Remove item from Shared with me
- */
+/* =========================================================
+   REMOVE FROM SHARED WITH ME
+========================================================= */
+
 router.delete(
   "/shared-with-me/:id",
+  validate({
+    params:
+      shareIdParamsSchema,
+  }),
   removeSharedWithMe
 );
 
-/*
- * Get shares for an owned resource
- */
+/* =========================================================
+   GET SHARES FOR OWNED RESOURCE
+========================================================= */
+
 router.get(
   "/",
+  validate({
+    query: resourceQuerySchema,
+  }),
   getResourceShares
 );
 
-/*
- * Owner removes a share
- */
+/* =========================================================
+   OWNER REMOVES SHARE
+========================================================= */
+
 router.delete(
   "/:id",
+  validate({
+    params:
+      shareIdParamsSchema,
+  }),
   deleteShare
 );
 

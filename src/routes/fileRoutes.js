@@ -27,6 +27,17 @@ const {
   requireEditorAccess,
 } = require("../middleware/sharePermission");
 
+const {
+  validate,
+  fileIdParamsSchema,
+  fileVersionParamsSchema,
+  getFilesQuerySchema,
+  uploadFileBodySchema,
+  renameFileSchema,
+  moveFileSchema,
+  searchQuerySchema,
+} = require("../middleware/validate");
+
 const router = express.Router();
 
 /* =========================================================
@@ -37,16 +48,23 @@ const storage = multer.diskStorage({
   destination: (req, file, cb) => {
     cb(
       null,
-      path.join(__dirname, "../../uploads")
+      path.join(
+        __dirname,
+        "../../uploads"
+      )
     );
   },
 
   filename: (req, file, cb) => {
+    const extension =
+      path.extname(
+        file.originalname || ""
+      );
+
     const uniqueName =
       `${Date.now()}-${Math.round(
         Math.random() * 1e9
-      )}` +
-      path.extname(file.originalname);
+      )}${extension}`;
 
     cb(null, uniqueName);
   },
@@ -54,8 +72,16 @@ const storage = multer.diskStorage({
 
 const upload = multer({
   storage,
+
   limits: {
-    fileSize: 50 * 1024 * 1024,
+    fileSize:
+      50 * 1024 * 1024,
+
+    files: 1,
+
+    fields: 10,
+
+    parts: 11,
   },
 });
 
@@ -71,11 +97,13 @@ router.use(authMiddleware);
 
 router.post(
   "/upload",
-  upload.any(),
+  upload.single("file"),
+  validate({
+    body: uploadFileBodySchema,
+  }),
   (req, res) => {
     if (
-      !req.files ||
-      req.files.length === 0
+      !req.file
     ) {
       return res.status(400).json({
         error: {
@@ -86,9 +114,10 @@ router.post(
       });
     }
 
-    req.file = req.files[0];
-
-    return uploadFile(req, res);
+    return uploadFile(
+      req,
+      res
+    );
   }
 );
 
@@ -98,11 +127,14 @@ router.post(
 
 router.post(
   "/:id/versions",
-  upload.any(),
+  upload.single("file"),
+  validate({
+    params: fileIdParamsSchema,
+    body: uploadFileBodySchema,
+  }),
   (req, res) => {
     if (
-      !req.files ||
-      req.files.length === 0
+      !req.file
     ) {
       return res.status(400).json({
         error: {
@@ -113,26 +145,42 @@ router.post(
       });
     }
 
-    req.file = req.files[0];
-
-    return uploadNewVersion(req, res);
+    return uploadNewVersion(
+      req,
+      res
+    );
   }
 );
 
 router.get(
   "/:id/versions",
+  validate({
+    params: fileIdParamsSchema,
+  }),
   getFileVersions
 );
 
 router.get(
   "/:id/versions/:versionId/download",
+  validate({
+    params:
+      fileVersionParamsSchema,
+  }),
   downloadFileVersion
 );
 
 router.post(
   "/:id/versions/:versionId/restore",
+  validate({
+    params:
+      fileVersionParamsSchema,
+  }),
   restoreFileVersion
 );
+
+/* =========================================================
+   RECENT FILES
+========================================================= */
 
 router.get(
   "/recent",
@@ -151,32 +199,62 @@ router.get(
 );
 
 /* =========================================================
+   SEARCH
+
+   Keep before /:id routes.
+========================================================= */
+
+router.get(
+  "/search",
+  validate({
+    query: searchQuerySchema,
+  }),
+  searchFilesAndFolders
+);
+
+/* =========================================================
    GET FILES
 ========================================================= */
 
 router.get(
   "/",
+  validate({
+    query: getFilesQuerySchema,
+  }),
   getFiles
 );
 
 /* =========================================================
    RENAME FILE
-
-   Owner + Editor
-   Viewer → 403
 ========================================================= */
 
 router.patch(
   "/:id",
+  validate({
+    params: fileIdParamsSchema,
+    body: renameFileSchema,
+  }),
   requireEditorAccess("file"),
   renameFile
 );
 
+/* =========================================================
+   MOVE FILE
+========================================================= */
+
 router.patch(
   "/:id/move",
+  validate({
+    params: fileIdParamsSchema,
+    body: moveFileSchema,
+  }),
   requireEditorAccess("file"),
   moveFile
 );
+
+/* =========================================================
+   TRASH
+========================================================= */
 
 router.get(
   "/trash",
@@ -185,11 +263,17 @@ router.get(
 
 router.patch(
   "/trash/:id/restore",
+  validate({
+    params: fileIdParamsSchema,
+  }),
   restoreFile
 );
 
 router.patch(
   "/trash/folder/:id/restore",
+  validate({
+    params: fileIdParamsSchema,
+  }),
   restoreFolder
 );
 
@@ -199,6 +283,9 @@ router.patch(
 
 router.get(
   "/:id/download",
+  validate({
+    params: fileIdParamsSchema,
+  }),
   downloadFile
 );
 
@@ -208,12 +295,10 @@ router.get(
 
 router.delete(
   "/:id",
+  validate({
+    params: fileIdParamsSchema,
+  }),
   deleteFile
-);
-
-router.get(
-  "/search",
-  searchFilesAndFolders
 );
 
 module.exports = router;

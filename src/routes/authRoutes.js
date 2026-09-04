@@ -9,14 +9,55 @@ const {
 
 const authMiddleware = require("../middleware/authMiddleware");
 
+const {
+  validate,
+  registerSchema,
+  loginSchema,
+} = require("../middleware/validate");
+
 const router = express.Router();
 
-router.post("/register", register);
+/* =========================================================
+   REGISTER
+========================================================= */
 
-router.post("/login", login);
+router.post(
+  "/register",
+  validate({
+    body: registerSchema,
+  }),
+  register
+);
 
-router.get("/me", authMiddleware, getMe);
+/* =========================================================
+   LOGIN
+========================================================= */
 
-router.post("/logout", logout);
+router.post(
+  "/login",
+  validate({
+    body: loginSchema,
+  }),
+  login
+);
+
+/* =========================================================
+   CURRENT USER
+========================================================= */
+
+router.get(
+  "/me",
+  authMiddleware,
+  getMe
+);
+
+/* =========================================================
+   LOGOUT
+========================================================= */
+
+router.post(
+  "/logout",
+  logout
+);
 
 module.exports = router;
