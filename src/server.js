@@ -60,4 +60,12 @@ const startServer = async () => {
   }
 };
 
+
+// Add this to backend/src/server.js
+
+const starRoutes = require("./routes/starRoutes");
+
+app.use("/api/stars", starRoutes);
+
+
 startServer();
