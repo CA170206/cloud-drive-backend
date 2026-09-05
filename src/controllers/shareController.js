@@ -1,11 +1,56 @@
-const fs = require("fs");
-const path = require("path");
 const crypto = require("crypto");
 const bcrypt = require("bcryptjs");
+const { get } = require("@vercel/blob");
 
 const { pool } = require("../config/database");
 
-const uploadsDir = path.join(__dirname, "../../uploads");
+/* =========================================================
+   BLOB STORAGE HELPERS
+========================================================= */
+
+const streamBlobToResponse = async (
+  blobPath,
+  res,
+  downloadName,
+  mimeType
+) => {
+  const blob = await get(blobPath, {
+    access: "private",
+  });
+
+  if (!blob) {
+    return false;
+  }
+
+  if (mimeType) {
+    res.setHeader("Content-Type", mimeType);
+  }
+
+  if (blob.size !== undefined && blob.size !== null) {
+    res.setHeader("Content-Length", String(blob.size));
+  }
+
+  res.setHeader(
+    "Content-Disposition",
+    `attachment; filename="${String(downloadName || "download")
+      .replace(/"/g, '\\"')
+      .replace(/[\r\n]/g, "")}"`
+  );
+
+  res.setHeader(
+    "Cache-Control",
+    "private, no-cache, no-store, must-revalidate"
+  );
+
+  if (blob.stream) {
+    const { Readable } = require("stream");
+
+    Readable.fromWeb(blob.stream).pipe(res);
+    return true;
+  }
+
+  return false;
+};
 
 /* =========================================================
    CREATE / UPDATE SHARE
@@ -553,12 +598,14 @@ const downloadSharedFile = async (
 
     const file = result.rows[0];
 
-    const filePath = path.join(
-      uploadsDir,
-      file.storage_key
+    const streamed = await streamBlobToResponse(
+      file.storage_key,
+      res,
+      file.name,
+      file.mime_type
     );
 
-    if (!fs.existsSync(filePath)) {
+    if (!streamed && !res.headersSent) {
       return res.status(404).json({
         error: {
           code: "STORAGE_FILE_NOT_FOUND",
@@ -568,15 +615,16 @@ const downloadSharedFile = async (
       });
     }
 
-    return res.download(
-      filePath,
-      file.name
-    );
+    return undefined;
   } catch (error) {
     console.error(
       "Download shared file error:",
       error
     );
+
+    if (res.headersSent) {
+      return;
+    }
 
     return res.status(500).json({
       error: {
@@ -684,7 +732,8 @@ const getSharedPermission = async (
     ) {
       return {
         hasAccess: true,
-        role: folderShare.rows[0].role,
+        role:
+          folderShare.rows[0].role,
         resourceType: "folder",
         resourceId,
       };
@@ -1243,12 +1292,14 @@ const accessPublicLink = async (req, res) => {
       }
     }
 
-    const filePath = path.join(
-      uploadsDir,
-      link.storage_key
+    const streamed = await streamBlobToResponse(
+      link.storage_key,
+      res,
+      link.name,
+      link.mime_type
     );
 
-    if (!fs.existsSync(filePath)) {
+    if (!streamed && !res.headersSent) {
       return res.status(404).json({
         error: {
           code: "STORAGE_FILE_NOT_FOUND",
@@ -1258,15 +1309,16 @@ const accessPublicLink = async (req, res) => {
       });
     }
 
-    return res.download(
-      filePath,
-      link.name
-    );
+    return undefined;
   } catch (error) {
     console.error(
       "Access public link error:",
       error
     );
+
+    if (res.headersSent) {
+      return;
+    }
 
     return res.status(500).json({
       error: {

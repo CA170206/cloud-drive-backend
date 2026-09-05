@@ -18,10 +18,6 @@ const {
 } = require("../controllers/shareController");
 
 const {
-  secureDownloadPath,
-} = require("../middleware/secureDownload");
-
-const {
   validate,
   createShareSchema,
   resourceQuerySchema,
@@ -53,9 +49,6 @@ router.get(
     query:
       publicLinkPasswordQuerySchema,
   }),
-  secureDownloadPath(
-    "public"
-  ),
   accessPublicLink
 );
 
@@ -164,9 +157,6 @@ router.get(
     params:
       sharedFileParamsSchema,
   }),
-  secureDownloadPath(
-    "file"
-  ),
   downloadSharedFile
 );
 
