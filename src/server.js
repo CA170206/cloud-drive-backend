@@ -40,11 +40,14 @@ const PORT =
 ========================================================= */
 
 app.use(
-  helmet()
+  helmet({
+    crossOriginResourcePolicy: false,
+    contentSecurityPolicy: false,
+  })
 );
 
 /* =========================================================
-   CORS
+   CORS & DB CONNECTION
 ========================================================= */
 
 app.use(
@@ -53,6 +56,16 @@ app.use(
     credentials: true,
   })
 );
+
+app.use(async (req, res, next) => {
+  try {
+    await connectDatabase();
+    next();
+  } catch (err) {
+    console.error("Database connection failed in request:", err);
+    next(err);
+  }
+});
 
 /* =========================================================
    BODY PARSING
@@ -183,4 +196,8 @@ const startServer = async () => {
   }
 };
 
-startServer();
+if (process.env.NODE_ENV !== "test" && !process.env.VERCEL) {
+  startServer();
+}
+
+module.exports = app;
