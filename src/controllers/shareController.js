@@ -11,8 +11,9 @@ const { pool } = require("../config/database");
 ========================================================= */
 
 const streamBlobToResponse = async (
-  blobPath,
+  req,
   res,
+  blobPath,
   downloadName,
   mimeType,
   disposition = "attachment"
@@ -48,58 +49,96 @@ const streamBlobToResponse = async (
     res.setHeader("Content-Type", contentType);
     res.setHeader("X-Content-Type-Options", "nosniff");
     res.setHeader("Cache-Control", "private, no-cache");
+    res.setHeader("Accept-Ranges", "bytes");
+    res.removeHeader("X-Frame-Options");
     res.setHeader(
       "Content-Disposition",
       `${disposition}; filename="download"; filename*=UTF-8''${encodedFileName}`
     );
-    res.setHeader("Content-Length", String(stat.size));
 
+    const rangeHeader = req?.headers?.range;
+    if (rangeHeader) {
+      const parts = rangeHeader.replace(/bytes=/, "").split("-");
+      const start = parseInt(parts[0], 10);
+      const end = parts[1] ? parseInt(parts[1], 10) : stat.size - 1;
+
+      if (!isNaN(start) && start <= end && start < stat.size) {
+        const chunkSize = end - start + 1;
+        res.status(206);
+        res.setHeader("Content-Range", `bytes ${start}-${end}/${stat.size}`);
+        res.setHeader("Content-Length", String(chunkSize));
+        fs.createReadStream(localFilePath, { start, end }).pipe(res);
+        return true;
+      }
+    }
+
+    res.setHeader("Content-Length", String(stat.size));
     fs.createReadStream(localFilePath).pipe(res);
     return true;
   }
 
   let blob;
   try {
-    blob = await get(blobPath, {
+    const getOptions = {
       access: "private",
-    });
+    };
+
+    if (req?.headers?.range) {
+      getOptions.headers = {
+        Range: req.headers.range,
+      };
+    }
+
+    blob = await get(blobPath, getOptions);
   } catch (err) {
     console.error("Vercel Blob get error in shareController:", err);
     return false;
   }
 
-  if (!blob) {
+  if (!blob || !blob.stream) {
     return false;
   }
 
-  if (mimeType) {
-    res.setHeader("Content-Type", mimeType);
-  }
-
-  if (blob.size !== undefined && blob.size !== null) {
-    res.setHeader("Content-Length", String(blob.size));
-  }
+  const contentType = mimeType || blob.blob?.contentType || "application/octet-stream";
+  res.setHeader("Content-Type", contentType);
+  res.setHeader("X-Content-Type-Options", "nosniff");
+  res.setHeader("Cache-Control", "private, no-cache");
+  res.setHeader("Accept-Ranges", "bytes");
+  res.removeHeader("X-Frame-Options");
 
   const encodedFileName = encodeURIComponent(downloadName || "download");
-
   res.setHeader(
     "Content-Disposition",
     `${disposition}; filename="download"; filename*=UTF-8''${encodedFileName}`
   );
 
-  res.setHeader(
-    "Cache-Control",
-    "private, no-cache, no-store, must-revalidate"
-  );
+  const contentRange =
+    blob.headers?.get?.("content-range") ||
+    blob.headers?.get?.("Content-Range");
+  const contentLength =
+    blob.headers?.get?.("content-length") ||
+    blob.headers?.get?.("Content-Length");
 
-  if (blob.stream) {
-    const { Readable } = require("stream");
-
-    Readable.fromWeb(blob.stream).pipe(res);
-    return true;
+  if (contentRange) {
+    res.status(206);
+    res.setHeader("Content-Range", contentRange);
+    if (contentLength) {
+      res.setHeader("Content-Length", contentLength);
+    }
+  } else if (blob.blob?.size !== undefined && blob.blob?.size !== null) {
+    res.setHeader("Content-Length", String(blob.blob.size));
+  } else if (blob.size !== undefined && blob.size !== null) {
+    res.setHeader("Content-Length", String(blob.size));
   }
 
-  return false;
+  try {
+    const { Readable } = require("stream");
+    Readable.fromWeb(blob.stream).pipe(res);
+    return true;
+  } catch (pipeErr) {
+    console.error("Pipe stream error in shareController:", pipeErr);
+    return false;
+  }
 };
 
 /* =========================================================
@@ -651,8 +690,9 @@ const downloadSharedFile = async (
     const disposition = req.query?.disposition === "inline" ? "inline" : "attachment";
 
     const streamed = await streamBlobToResponse(
-      file.storage_key,
+      req,
       res,
+      file.storage_key,
       file.name,
       file.mime_type,
       disposition
@@ -1348,8 +1388,9 @@ const accessPublicLink = async (req, res) => {
     const disposition = req.query?.disposition === "inline" ? "inline" : "attachment";
 
     const streamed = await streamBlobToResponse(
-      link.storage_key,
+      req,
       res,
+      link.storage_key,
       link.name,
       link.mime_type,
       disposition

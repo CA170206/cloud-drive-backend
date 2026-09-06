@@ -2392,6 +2392,7 @@ const isAllowedBlobPath = (
 ========================================================= */
 
 const streamBlobToResponse = async (
+  req,
   res,
   storageKey,
   fileName,
@@ -2432,12 +2433,30 @@ const streamBlobToResponse = async (
     res.setHeader("Content-Type", contentType);
     res.setHeader("X-Content-Type-Options", "nosniff");
     res.setHeader("Cache-Control", "private, no-cache");
+    res.setHeader("Accept-Ranges", "bytes");
+    res.removeHeader("X-Frame-Options");
     res.setHeader(
       "Content-Disposition",
       `${disposition}; filename="download"; filename*=UTF-8''${encodedFileName}`
     );
-    res.setHeader("Content-Length", String(stat.size));
 
+    const rangeHeader = req?.headers?.range;
+    if (rangeHeader) {
+      const parts = rangeHeader.replace(/bytes=/, "").split("-");
+      const start = parseInt(parts[0], 10);
+      const end = parts[1] ? parseInt(parts[1], 10) : stat.size - 1;
+
+      if (!isNaN(start) && start <= end && start < stat.size) {
+        const chunkSize = end - start + 1;
+        res.status(206);
+        res.setHeader("Content-Range", `bytes ${start}-${end}/${stat.size}`);
+        res.setHeader("Content-Length", String(chunkSize));
+        fs.createReadStream(localPath, { start, end }).pipe(res);
+        return true;
+      }
+    }
+
+    res.setHeader("Content-Length", String(stat.size));
     fs.createReadStream(localPath).pipe(res);
     return true;
   }
@@ -2445,11 +2464,19 @@ const streamBlobToResponse = async (
   let blobResult;
 
   try {
+    const getOptions = {
+      access: "private",
+    };
+
+    if (req?.headers?.range) {
+      getOptions.headers = {
+        Range: req.headers.range,
+      };
+    }
+
     blobResult = await get(
       storageKey,
-      {
-        access: "private",
-      }
+      getOptions
     );
   } catch (error) {
     console.error(
@@ -2462,7 +2489,6 @@ const streamBlobToResponse = async (
 
   if (
     !blobResult ||
-    blobResult.statusCode !== 200 ||
     !blobResult.stream
   ) {
     return false;
@@ -2488,10 +2514,13 @@ const streamBlobToResponse = async (
     "private, no-cache"
   );
 
-  /*
-   * RFC 5987-compatible filename header.
-   * This safely supports spaces and Unicode filenames.
-   */
+  res.setHeader(
+    "Accept-Ranges",
+    "bytes"
+  );
+
+  res.removeHeader("X-Frame-Options");
+
   const encodedFileName =
     encodeURIComponent(
       fileName || "download"
@@ -2502,7 +2531,20 @@ const streamBlobToResponse = async (
     `${disposition}; filename="download"; filename*=UTF-8''${encodedFileName}`
   );
 
-  if (
+  const contentRange =
+    blobResult.headers?.get?.("content-range") ||
+    blobResult.headers?.get?.("Content-Range");
+  const contentLength =
+    blobResult.headers?.get?.("content-length") ||
+    blobResult.headers?.get?.("Content-Length");
+
+  if (contentRange) {
+    res.status(206);
+    res.setHeader("Content-Range", contentRange);
+    if (contentLength) {
+      res.setHeader("Content-Length", contentLength);
+    }
+  } else if (
     blobResult.blob?.size !== null &&
     blobResult.blob?.size !== undefined
   ) {
@@ -2516,6 +2558,7 @@ const streamBlobToResponse = async (
     Readable.fromWeb(
       blobResult.stream
     ).pipe(res);
+    return true;
   } catch (error) {
     console.error(
       "Blob stream error:",
@@ -2524,8 +2567,6 @@ const streamBlobToResponse = async (
 
     return false;
   }
-
-  return true;
 };
 
 /* =========================================================
@@ -3923,6 +3964,7 @@ const downloadFile = async (
 
     const streamed =
       await streamBlobToResponse(
+        req,
         res,
         file.storage_key,
         file.name,
@@ -4242,6 +4284,7 @@ const downloadFileVersion =
 
       const streamed =
         await streamBlobToResponse(
+          req,
           res,
           version.storage_key,
           version.name,
