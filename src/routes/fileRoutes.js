@@ -50,9 +50,17 @@ const router = express.Router();
    MULTER LOCAL STORAGE SETUP
 ========================================================= */
 
-const uploadDir = path.join(__dirname, "../../uploads");
-if (!fs.existsSync(uploadDir)) {
-  fs.mkdirSync(uploadDir, { recursive: true });
+// Vercel serverless filesystem is read-only outside /tmp
+const uploadDir = process.env.VERCEL
+  ? "/tmp/uploads"
+  : path.join(__dirname, "../../uploads");
+
+try {
+  if (!fs.existsSync(uploadDir)) {
+    fs.mkdirSync(uploadDir, { recursive: true });
+  }
+} catch (e) {
+  console.warn("Could not create upload dir (may be read-only):", e.message);
 }
 
 const storage = multer.diskStorage({
