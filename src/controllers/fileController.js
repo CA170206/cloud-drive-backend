@@ -2395,7 +2395,8 @@ const streamBlobToResponse = async (
   res,
   storageKey,
   fileName,
-  mimeType
+  mimeType,
+  disposition = "attachment"
 ) => {
   if (
     !storageKey ||
@@ -2433,7 +2434,7 @@ const streamBlobToResponse = async (
     res.setHeader("Cache-Control", "private, no-cache");
     res.setHeader(
       "Content-Disposition",
-      `attachment; filename="download"; filename*=UTF-8''${encodedFileName}`
+      `${disposition}; filename="download"; filename*=UTF-8''${encodedFileName}`
     );
     res.setHeader("Content-Length", String(stat.size));
 
@@ -2498,7 +2499,7 @@ const streamBlobToResponse = async (
 
   res.setHeader(
     "Content-Disposition",
-    `attachment; filename="download"; filename*=UTF-8''${encodedFileName}`
+    `${disposition}; filename="download"; filename*=UTF-8''${encodedFileName}`
   );
 
   if (
@@ -3917,12 +3918,16 @@ const downloadFile = async (
     const file =
       result.rows[0];
 
+    const disposition =
+      req.query?.disposition === "inline" ? "inline" : "attachment";
+
     const streamed =
       await streamBlobToResponse(
         res,
         file.storage_key,
         file.name,
-        file.mime_type
+        file.mime_type,
+        disposition
       );
 
     if (!streamed) {
@@ -4232,12 +4237,16 @@ const downloadFileVersion =
       const version =
         result.rows[0];
 
+      const disposition =
+        req.query?.disposition === "inline" ? "inline" : "attachment";
+
       const streamed =
         await streamBlobToResponse(
           res,
           version.storage_key,
           version.name,
-          version.mime_type
+          version.mime_type,
+          disposition
         );
 
       if (!streamed) {
