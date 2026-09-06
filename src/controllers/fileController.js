@@ -2164,6 +2164,8 @@
 // };
 
 
+const fs = require("fs");
+const path = require("path");
 const crypto = require("crypto");
 const { Readable } = require("stream");
 
@@ -2181,6 +2183,15 @@ const { pool } = require("../config/database");
 const {
   getResourcePermission,
 } = require("../middleware/sharePermission");
+
+const getUploadMode = async (req, res) => {
+  const hasBlobToken = Boolean(process.env.BLOB_READ_WRITE_TOKEN);
+  return res.status(200).json({
+    success: true,
+    mode: hasBlobToken ? "vercel-blob" : "local",
+    hasBlobToken,
+  });
+};
 
 /* =========================================================
    CONSTANTS
@@ -2391,6 +2402,43 @@ const streamBlobToResponse = async (
     typeof storageKey !== "string"
   ) {
     return false;
+  }
+
+  // Check if this is a local disk storage key
+  let isLocal = false;
+  let localPath = "";
+
+  if (storageKey.startsWith("uploads/") || storageKey.startsWith("uploads\\")) {
+    isLocal = true;
+    localPath = path.join(__dirname, "../../", storageKey);
+  } else if (!storageKey.startsWith("http://") && !storageKey.startsWith("https://")) {
+    const candidate = path.join(__dirname, "../../uploads", path.basename(storageKey));
+    if (fs.existsSync(candidate)) {
+      isLocal = true;
+      localPath = candidate;
+    }
+  }
+
+  if (isLocal) {
+    if (!fs.existsSync(localPath)) {
+      return false;
+    }
+
+    const stat = fs.statSync(localPath);
+    const contentType = mimeType || "application/octet-stream";
+    const encodedFileName = encodeURIComponent(fileName || "download");
+
+    res.setHeader("Content-Type", contentType);
+    res.setHeader("X-Content-Type-Options", "nosniff");
+    res.setHeader("Cache-Control", "private, no-cache");
+    res.setHeader(
+      "Content-Disposition",
+      `attachment; filename="download"; filename*=UTF-8''${encodedFileName}`
+    );
+    res.setHeader("Content-Length", String(stat.size));
+
+    fs.createReadStream(localPath).pipe(res);
+    return true;
   }
 
   let blobResult;
@@ -3139,13 +3187,103 @@ const uploadFile = async (
   req,
   res
 ) => {
-  return res.status(410).json({
-    error: {
-      code: "LEGACY_UPLOAD_ENDPOINT",
-      message:
-        "The legacy upload endpoint has been replaced by Vercel Blob client uploads",
-    },
-  });
+  try {
+    if (!req.file) {
+      return res.status(400).json({
+        error: {
+          code: "FILE_REQUIRED",
+          message: "Please select a file to upload",
+        },
+      });
+    }
+
+    const userId = req.user.userId;
+    const folderId = req.body?.folderId || null;
+
+    let folderIdToUse = null;
+    if (folderId && folderId !== "null" && folderId !== "undefined") {
+      const folderCheck = await pool.query(
+        `SELECT id FROM folders WHERE id = $1 AND owner_id = $2 AND is_deleted = FALSE`,
+        [folderId, userId]
+      );
+      if (folderCheck.rows.length === 0) {
+        return res.status(404).json({
+          error: {
+            code: "FOLDER_NOT_FOUND",
+            message: "Target folder not found",
+          },
+        });
+      }
+      folderIdToUse = folderId;
+    }
+
+    const originalName = req.file.originalname;
+    const nameValidation = validateFileName(originalName);
+    if (!nameValidation.valid) {
+      return res.status(400).json({
+        error: {
+          code: "INVALID_FILE_NAME",
+          message: nameValidation.message,
+        },
+      });
+    }
+
+    const mimeType = req.file.mimetype || "application/octet-stream";
+    const sizeBytes = req.file.size;
+    const storageKey = `uploads/${req.file.filename}`;
+
+    let checksum = null;
+    try {
+      const fileBuffer = fs.readFileSync(req.file.path);
+      checksum = crypto.createHash("sha256").update(fileBuffer).digest("hex");
+    } catch (e) {
+      console.error("Error computing file checksum:", e);
+    }
+
+    const fileInsert = await pool.query(
+      `INSERT INTO files (
+         name, mime_type, size_bytes, storage_key, owner_id, folder_id, checksum
+       )
+       VALUES ($1, $2, $3, $4, $5, $6, $7)
+       RETURNING id, name, mime_type, size_bytes, folder_id, is_deleted, created_at, updated_at`,
+      [
+        nameValidation.name,
+        mimeType,
+        sizeBytes,
+        storageKey,
+        userId,
+        folderIdToUse,
+        checksum,
+      ]
+    );
+
+    const insertedFile = fileInsert.rows[0];
+
+    try {
+      await logActivity(
+        userId,
+        "upload_file",
+        "file",
+        insertedFile.id,
+        `Uploaded file "${nameValidation.name}"`
+      );
+    } catch (actErr) {
+      console.error("Failed to log upload activity:", actErr);
+    }
+
+    return res.status(201).json({
+      success: true,
+      file: insertedFile,
+    });
+  } catch (error) {
+    console.error("Upload error:", error);
+    return res.status(500).json({
+      error: {
+        code: "UPLOAD_FAILED",
+        message: "Failed to upload file",
+      },
+    });
+  }
 };
 
 /* =========================================================
@@ -3699,11 +3837,29 @@ const downloadFile = async (
   res
 ) => {
   try {
-    const ownerId =
+    const userId =
       req.user.userId;
 
     const { id } =
       req.params;
+
+    const permission =
+      await getResourcePermission(
+        userId,
+        "file",
+        id
+      );
+
+    if (!permission) {
+      return res.status(404).json({
+        error: {
+          code:
+            "FILE_NOT_FOUND",
+          message:
+            "File not found",
+        },
+      });
+    }
 
     const result =
       await pool.query(
@@ -3713,12 +3869,8 @@ const downloadFile = async (
            mime_type
          FROM files
          WHERE id = $1
-           AND owner_id = $2
            AND is_deleted = FALSE`,
-        [
-          id,
-          ownerId,
-        ]
+        [id]
       );
 
     if (
@@ -3867,8 +4019,7 @@ const uploadNewVersion = async (
 ) => {
   return res.status(410).json({
     error: {
-      code:
-        "LEGACY_VERSION_UPLOAD_ENDPOINT",
+      code: "LEGACY_VERSION_UPLOAD_ENDPOINT",
       message:
         "Version uploads now use direct Vercel Blob client uploads",
     },
@@ -5042,6 +5193,7 @@ const getRecentFiles =
 ========================================================= */
 
 module.exports = {
+  getUploadMode,
   handleBlobUpload,
   uploadFile,
   getFiles,

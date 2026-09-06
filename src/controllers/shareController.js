@@ -1,3 +1,5 @@
+const fs = require("fs");
+const path = require("path");
 const crypto = require("crypto");
 const bcrypt = require("bcryptjs");
 const { get } = require("@vercel/blob");
@@ -14,9 +16,56 @@ const streamBlobToResponse = async (
   downloadName,
   mimeType
 ) => {
-  const blob = await get(blobPath, {
-    access: "private",
-  });
+  if (!blobPath || typeof blobPath !== "string") {
+    return false;
+  }
+
+  // Check if blobPath is a local file
+  let isLocal = false;
+  let localFilePath = "";
+
+  if (blobPath.startsWith("uploads/") || blobPath.startsWith("uploads\\")) {
+    isLocal = true;
+    localFilePath = path.join(__dirname, "../../", blobPath);
+  } else if (!blobPath.startsWith("http://") && !blobPath.startsWith("https://")) {
+    const candidate = path.join(__dirname, "../../uploads", path.basename(blobPath));
+    if (fs.existsSync(candidate)) {
+      isLocal = true;
+      localFilePath = candidate;
+    }
+  }
+
+  if (isLocal) {
+    if (!fs.existsSync(localFilePath)) {
+      return false;
+    }
+
+    const stat = fs.statSync(localFilePath);
+    const contentType = mimeType || "application/octet-stream";
+    const encodedFileName = encodeURIComponent(downloadName || "download");
+
+    res.setHeader("Content-Type", contentType);
+    res.setHeader("X-Content-Type-Options", "nosniff");
+    res.setHeader("Cache-Control", "private, no-cache");
+    res.setHeader(
+      "Content-Disposition",
+      `attachment; filename="download"; filename*=UTF-8''${encodedFileName}`
+    );
+    res.setHeader("Content-Length", String(stat.size));
+
+    fs.createReadStream(localFilePath).pipe(res);
+    return true;
+  }
+
+  let blob;
+  try {
+    blob = await get(blobPath, {
+      access: "private",
+    });
+  } catch (err) {
+    console.error("Vercel Blob get error in shareController:", err);
+    return false;
+  }
 
   if (!blob) {
     return false;
@@ -30,11 +79,11 @@ const streamBlobToResponse = async (
     res.setHeader("Content-Length", String(blob.size));
   }
 
+  const encodedFileName = encodeURIComponent(downloadName || "download");
+
   res.setHeader(
     "Content-Disposition",
-    `attachment; filename="${String(downloadName || "download")
-      .replace(/"/g, '\\"')
-      .replace(/[\r\n]/g, "")}"`
+    `attachment; filename="download"; filename*=UTF-8''${encodedFileName}`
   );
 
   res.setHeader(
