@@ -2573,10 +2573,19 @@ const handleBlobUpload = async (
     const body =
       req.body || {};
 
+    const reqHost = req.get("host") || "cloud-drive-internship.vercel.app";
+    const reqProto = req.get("x-forwarded-proto") || (req.secure ? "https" : "http");
+    const callbackUrl = process.env.APP_URL
+      ? `${process.env.APP_URL}/api/files/blob-upload`
+      : `${reqProto}://${reqHost}/api/files/blob-upload`;
+
     const jsonResponse =
       await handleUpload({
         body,
-        request: req,
+        request: {
+          ...req,
+          url: req.originalUrl || "/api/files/blob-upload",
+        },
 
         /* -------------------------------------------------
            BEFORE CLIENT TOKEN
@@ -2780,6 +2789,7 @@ const handleBlobUpload = async (
                */
 
               addRandomSuffix: true,
+              callbackUrl,
 
               /*
                * Private Blob store.
@@ -2919,30 +2929,47 @@ const handleBlobUpload = async (
                 }
               }
 
-              await pool.query(
-                `INSERT INTO files
-                 (
-                   name,
-                   mime_type,
-                   size_bytes,
-                   storage_key,
-                   owner_id,
-                   folder_id
-                 )
-                 VALUES
-                 ($1, $2, $3, $4, $5, $6)`,
-                [
-                  validatedName.name,
-                  contentType ||
-                    metadata.contentType ||
-                    "application/octet-stream",
-                  metadata.size,
-                  blob.pathname,
-                  userId,
-                  folderId ||
-                    null,
-                ]
+              const existingFile = await pool.query(
+                `SELECT id FROM files WHERE storage_key = $1 AND is_deleted = FALSE`,
+                [blob.pathname]
               );
+
+              if (existingFile.rows.length === 0) {
+                await pool.query(
+                  `INSERT INTO files
+                   (
+                     name,
+                     mime_type,
+                     size_bytes,
+                     storage_key,
+                     owner_id,
+                     folder_id
+                   )
+                   VALUES
+                   ($1, $2, $3, $4, $5, $6)`,
+                  [
+                    validatedName.name,
+                    contentType ||
+                      metadata.contentType ||
+                      "application/octet-stream",
+                    metadata.size,
+                    blob.pathname,
+                    userId,
+                    folderId ||
+                      null,
+                  ]
+                );
+
+                try {
+                  await pool.query(
+                    `INSERT INTO activities (user_id, action, resource_type, resource_name)
+                     VALUES ($1, 'upload', 'file', $2)`,
+                    [userId, validatedName.name]
+                  );
+                } catch (actErr) {
+                  console.warn("Could not log activity in webhook:", actErr);
+                }
+              }
 
               return;
             }
@@ -5189,12 +5216,256 @@ const getRecentFiles =
   };
 
 /* =========================================================
+   DIRECT BLOB UPLOAD CONFIRMATION
+========================================================= */
+
+const confirmBlobUpload = async (req, res) => {
+  try {
+    const userId = req.user?.userId;
+    const { pathname, fileName, contentType, folderId } = req.body || {};
+
+    if (!userId || !pathname) {
+      return res.status(400).json({
+        error: {
+          code: "VALIDATION_ERROR",
+          message: "Invalid upload confirmation parameters",
+        },
+      });
+    }
+
+    if (!isAllowedBlobPath(pathname, userId)) {
+      return res.status(403).json({
+        error: {
+          code: "FORBIDDEN",
+          message: "Invalid blob path",
+        },
+      });
+    }
+
+    const existing = await pool.query(
+      `SELECT id, name, mime_type, size_bytes, storage_key, owner_id, folder_id, created_at, updated_at
+       FROM files
+       WHERE storage_key = $1 AND is_deleted = FALSE`,
+      [pathname]
+    );
+
+    if (existing.rows.length > 0) {
+      return res.status(200).json({
+        success: true,
+        file: existing.rows[0],
+      });
+    }
+
+    const metadata = await verifyBlobExists(pathname);
+    if (!metadata) {
+      return res.status(404).json({
+        error: {
+          code: "NOT_FOUND",
+          message: "Uploaded blob not found in storage",
+        },
+      });
+    }
+
+    const nameValidation = validateFileName(fileName || path.basename(pathname));
+    if (!nameValidation.valid) {
+      return res.status(400).json({
+        error: {
+          code: "VALIDATION_ERROR",
+          message: nameValidation.message,
+        },
+      });
+    }
+
+    if (folderId) {
+      const folder = await pool.query(
+        `SELECT id
+         FROM folders
+         WHERE id = $1
+           AND owner_id = $2
+           AND is_deleted = FALSE`,
+        [folderId, userId]
+      );
+
+      if (folder.rows.length === 0) {
+        return res.status(404).json({
+          error: {
+            code: "NOT_FOUND",
+            message: "Folder not found",
+          },
+        });
+      }
+    }
+
+    const insertResult = await pool.query(
+      `INSERT INTO files
+       (
+         name,
+         mime_type,
+         size_bytes,
+         storage_key,
+         owner_id,
+         folder_id
+       )
+       VALUES ($1, $2, $3, $4, $5, $6)
+       RETURNING id, name, mime_type, size_bytes, storage_key, owner_id, folder_id, created_at, updated_at`,
+      [
+        nameValidation.name,
+        contentType || metadata.contentType || "application/octet-stream",
+        metadata.size,
+        pathname,
+        userId,
+        folderId || null,
+      ]
+    );
+
+    try {
+      await pool.query(
+        `INSERT INTO activities (user_id, action, resource_type, resource_id, resource_name)
+         VALUES ($1, 'upload', 'file', $2, $3)`,
+        [userId, insertResult.rows[0].id, nameValidation.name]
+      );
+    } catch (actErr) {
+      console.warn("Could not log activity:", actErr);
+    }
+
+    return res.status(201).json({
+      success: true,
+      file: insertResult.rows[0],
+    });
+  } catch (error) {
+    console.error("Confirm blob upload error:", error);
+    return res.status(500).json({
+      error: {
+        code: "INTERNAL_ERROR",
+        message: error?.message || "Failed to confirm upload",
+      },
+    });
+  }
+};
+
+const confirmVersionBlobUpload = async (req, res) => {
+  try {
+    const userId = req.user?.userId;
+    const fileId = req.params?.id;
+    const { pathname, fileName, contentType } = req.body || {};
+
+    if (!userId || !fileId || !pathname) {
+      return res.status(400).json({
+        error: {
+          code: "VALIDATION_ERROR",
+          message: "Invalid version confirmation parameters",
+        },
+      });
+    }
+
+    if (!isAllowedBlobPath(pathname, userId)) {
+      return res.status(403).json({
+        error: {
+          code: "FORBIDDEN",
+          message: "Invalid blob path",
+        },
+      });
+    }
+
+    const permission = await getResourcePermission(userId, "file", fileId);
+    if (!permission) {
+      return res.status(404).json({ error: { code: "NOT_FOUND", message: "File not found" } });
+    }
+    if (permission.role !== "owner" && permission.role !== "editor") {
+      return res.status(403).json({ error: { code: "FORBIDDEN", message: "You only have viewer permission for this file" } });
+    }
+
+    const existingVersion = await pool.query(
+      `SELECT id FROM file_versions WHERE storage_key = $1`,
+      [pathname]
+    );
+    if (existingVersion.rows.length > 0) {
+      return res.status(200).json({ success: true });
+    }
+
+    const metadata = await verifyBlobExists(pathname);
+    if (!metadata) {
+      return res.status(404).json({ error: { code: "NOT_FOUND", message: "Uploaded blob not found in storage" } });
+    }
+
+    const nameValidation = validateFileName(fileName || path.basename(pathname));
+    if (!nameValidation.valid) {
+      return res.status(400).json({ error: { code: "VALIDATION_ERROR", message: nameValidation.message } });
+    }
+
+    const client = await pool.connect();
+    try {
+      await client.query("BEGIN");
+      const fileResult = await client.query(
+        `SELECT id, name, mime_type, size_bytes, storage_key, owner_id, folder_id
+         FROM files WHERE id = $1 AND is_deleted = FALSE`,
+        [fileId]
+      );
+      if (fileResult.rows.length === 0) {
+        throw new Error("File not found");
+      }
+      const currentFile = fileResult.rows[0];
+
+      const versionResult = await client.query(
+        `SELECT COALESCE(MAX(version_number), 0)::int AS max_version
+         FROM file_versions WHERE file_id = $1`,
+        [fileId]
+      );
+      let nextVersion = versionResult.rows[0].max_version + 1;
+
+      if (nextVersion === 1) {
+        await client.query(
+          `INSERT INTO file_versions (file_id, version_number, storage_key, size_bytes, checksum)
+           VALUES ($1, 1, $2, $3, null)`,
+          [fileId, currentFile.storage_key, currentFile.size_bytes]
+        );
+        nextVersion = 2;
+      }
+
+      await client.query(
+        `INSERT INTO file_versions (file_id, version_number, storage_key, size_bytes, checksum)
+         VALUES ($1, $2, $3, $4, $5)`,
+        [fileId, nextVersion, pathname, metadata.size, metadata.etag || null]
+      );
+
+      await client.query(
+        `UPDATE files
+         SET name = $1, mime_type = $2, size_bytes = $3, storage_key = $4, updated_at = NOW()
+         WHERE id = $5 AND is_deleted = FALSE`,
+        [
+          nameValidation.name,
+          contentType || metadata.contentType || "application/octet-stream",
+          metadata.size,
+          pathname,
+          fileId,
+        ]
+      );
+
+      await client.query("COMMIT");
+      return res.status(200).json({ success: true });
+    } catch (err) {
+      await client.query("ROLLBACK").catch(() => {});
+      throw err;
+    } finally {
+      client.release();
+    }
+  } catch (error) {
+    console.error("Confirm version blob upload error:", error);
+    return res.status(500).json({
+      error: { code: "INTERNAL_ERROR", message: error?.message || "Failed to confirm version upload" },
+    });
+  }
+};
+
+/* =========================================================
    EXPORTS
 ========================================================= */
 
 module.exports = {
   getUploadMode,
   handleBlobUpload,
+  confirmBlobUpload,
+  confirmVersionBlobUpload,
   uploadFile,
   getFiles,
   getStorageStats,

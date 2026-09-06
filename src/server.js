@@ -118,6 +118,27 @@ app.get(
 );
 
 /* =========================================================
+   VERCEL BLOB WEBHOOK & DIRECT ENDPOINTS
+========================================================= */
+
+const { handleBlobUpload } = require("./controllers/fileController");
+const authMiddleware = require("./middleware/authMiddleware");
+
+const blobUploadAuth = (req, res, next) => {
+  if (
+    req.body &&
+    req.body.type === "blob.upload-completed"
+  ) {
+    return next();
+  }
+
+  return authMiddleware(req, res, next);
+};
+
+app.post("/blob-upload", blobUploadAuth, handleBlobUpload);
+app.post("/api/files/blob-upload", blobUploadAuth, handleBlobUpload);
+
+/* =========================================================
    API ROUTES
 ========================================================= */
 

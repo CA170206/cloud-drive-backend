@@ -8,6 +8,8 @@ const authMiddleware = require("../middleware/authMiddleware");
 const {
   getUploadMode,
   handleBlobUpload,
+  confirmBlobUpload,
+  confirmVersionBlobUpload,
   uploadFile,
   getFiles,
   getStorageStats,
@@ -128,8 +130,18 @@ router.use(
 );
 
 /* =========================================================
-   FALLBACK / DIRECT MULTIPART UPLOAD ROUTES
+   FALLBACK / DIRECT MULTIPART UPLOAD ROUTES & CONFIRMATION
 ========================================================= */
+
+router.post(
+  "/confirm-blob",
+  confirmBlobUpload
+);
+
+router.post(
+  "/:id/versions/confirm-blob",
+  confirmVersionBlobUpload
+);
 
 router.post(
   "/upload",
